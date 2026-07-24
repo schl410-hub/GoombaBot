@@ -1625,7 +1625,7 @@ var GoombaBotConfig = {
   // 통째로 붙여넣은 예전 방식이면 이 명령어는 반영 확인만 해주고 실제로는 안 바뀐다
   // (자세한 원리는 loader.js와 commands/botcontrol.js 주석 참고).
   // 예: "https://raw.githubusercontent.com/사용자명/저장소명/main/main.js"
-  githubMainJsRawUrl: null // TODO: 실제 저장소 주소로 교체
+  githubMainJsRawUrl: "https://raw.githubusercontent.com/schl410-hub/GoombaBot/main/main.js"
 };
 
 module.exports = {
