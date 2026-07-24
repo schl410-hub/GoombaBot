@@ -25,7 +25,7 @@
 
 // TODO: 실제 GitHub raw main.js 주소로 교체해주세요.
 // 예: "https://raw.githubusercontent.com/사용자명/저장소명/main/main.js"
-var GOOMBABOT_MAIN_JS_URL = "";
+var GOOMBABOT_MAIN_JS_URL = "https://raw.githubusercontent.com/schl410-hub/GoombaBot/main/main.js";
 
 var GoombaBotRuntime = {};
 
