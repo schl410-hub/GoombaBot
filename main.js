@@ -157,7 +157,7 @@ require("../core/router.js");
       chat.reply([
         "\u26A0\uFE0F githubMainJsRawUrl이 아직 설정되지 않았습니다.",
         "config.js에 실제 GitHub raw main.js 주소를 넣어주셔야 합니다.",
-        "예: https://raw.githubusercontent.com/사용자명/저장소명/main/main.js"
+        "예: https://raw.githubusercontent.com/사용자명/저장소명/main/main.js.b64"
       ].join("\n"));
       return;
     }
@@ -178,9 +178,16 @@ require("../core/router.js");
 
     try {
       var url = String(GoombaBotConfig.githubMainJsRawUrl);
-      var newCode = GoombaBot.http.getRawText(url, 20000);
+      var b64Text = GoombaBot.http.getRawText(url, 20000);
 
-      if (!newCode || newCode.length < 200) throw new Error("받아온 코드가 비정상적으로 짧습니다 (" + (newCode ? newCode.length : 0) + "자)");
+      if (!b64Text || b64Text.length < 100) throw new Error("받아온 코드가 비정상적으로 짧습니다 (" + (b64Text ? b64Text.length : 0) + "자)");
+
+      // ⚠️ GitHub에는 main.js가 아니라 main.js.b64(base64)를 올려둔다 - Http.requestSync가
+      // 반환하는 jsoup Document가 응답을 HTML로 취급해서, 순수 JS 코드를 그대로 받으면
+      // <, >, & 등이 손상되어 eval 시 SyntaxError가 나는 것이 실기기에서 확인됐다.
+      // base64는 그런 문자가 전혀 없어서 안전하다.
+      var newCode = GoombaBot.http.base64Decode(b64Text);
+      if (!newCode || newCode.length < 200) throw new Error("디코딩된 코드가 비정상적으로 짧습니다 (" + (newCode ? newCode.length : 0) + "자)");
 
       // ⚠️ 반드시 간접 eval을 써야 한다 (직접 eval을 쓰면 이 함수 지역 스코프에만 반영되고
       // 함수가 끝나는 순간 사라진다 - ECMAScript 명세, Node.js로 재현/검증함).
@@ -1364,11 +1371,53 @@ GoombaBot.http = (function () {
     }
   }
 
-  /** JSON이 아니라 순수 텍스트(예: GitHub의 main.js 소스코드 원문)를 그대로 받아온다 */
+  /**
+   * jsoup을 완전히 우회하는 1순위 방법 - Java의 URLConnection/InputStream을 LiveConnect로
+   * 직접 사용한다 (loader.js의 goombaFetchViaJavaUrlConnection과 완전히 동일한 구현 -
+   * !굼바봇 업데이트도 로더와 똑같은 방식을 쓰기 위함). 실패하면 예외를 던진다.
+   */
+  function fetchViaJavaUrlConnection(url) {
+    var javaUrl = new Packages.java.net.URL(String(url));
+    var conn = javaUrl.openConnection();
+    conn.setConnectTimeout(15000);
+    conn.setReadTimeout(15000);
+    conn.setRequestProperty(
+      "User-Agent",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    );
+
+    var inputStream = conn.getInputStream();
+    var reader = new Packages.java.io.BufferedReader(new Packages.java.io.InputStreamReader(inputStream, "UTF-8"));
+    var sb = new Packages.java.lang.StringBuilder();
+    var line = reader.readLine();
+    var isFirst = true;
+    while (line !== null) {
+      if (!isFirst) sb.append("\n");
+      sb.append(line);
+      isFirst = false;
+      line = reader.readLine();
+    }
+    reader.close();
+    return String(sb.toString());
+  }
+
+  /**
+   * JSON이 아니라 순수 텍스트(예: GitHub의 main.js.b64 base64 원문)를 그대로 받아온다.
+   * ⚠️ 1순위로 Java URLConnection(jsoup 완전 우회)을 시도하고, 실패하면 2순위로
+   * Http.requestSync(jsoup을 거치지만 base64 텍스트라 안전)로 넘어간다 - loader.js와
+   * 완전히 동일한 순서/방식이다 (실기기에서 body().text()가 줄바꿈을 전부 없애버려서
+   * "//" 주석이 파일 끝까지 코드를 삼켜버리는 문제가 확인됐음 - 그 대응책).
+   */
   function getRawText(url, timeoutMs) {
-    var requestOption = { url: String(url), method: "GET", timeout: timeoutMs || DEFAULT_TIMEOUT_MS, headers: mergeHeaders(null) };
-    var doc = Http.requestSync(requestOption); // 실패하면 예외가 그대로 호출부로 전파됨 (의도적)
-    return extractBodyText(doc).text;
+    try {
+      return fetchViaJavaUrlConnection(url);
+    } catch (javaError) {
+      var requestOption = { url: String(url), method: "GET", timeout: timeoutMs || DEFAULT_TIMEOUT_MS, headers: mergeHeaders(null) };
+      var doc = Http.requestSync(requestOption);
+      try { return String(doc.body().text()); } catch (e1) {}
+      try { return String(doc.text()); } catch (e2) {}
+      return String(doc);
+    }
   }
 
   /** apiBase(중계 서버) 뒤에 path를 붙여서 요청한다 - 대부분의 기존 코드가 쓰는 방식 */
@@ -1425,7 +1474,66 @@ GoombaBot.http = (function () {
     return { ok: true, stage: "done", url: url, topType: topType, topKeys: topKeys, arrayCount: arr.length, firstItemKeys: firstItemKeys };
   }
 
-  return { getJson: getJson, getJsonFromUrl: getJsonFromUrl, getRawText: getRawText, inspect: inspect };
+  /**
+   * 순수 JavaScript(ES5)로 직접 구현한 base64 디코더 - loader.js와 완전히 동일한 구현.
+   * !굼바봇 업데이트(botcontrol.js)가 GitHub의 main.js.b64를 받아서 디코딩할 때 쓴다.
+   * (Http.requestSync가 반환하는 jsoup Document가 응답을 HTML로 취급해서, 순수 JS
+   * 코드를 그대로 받으면 <, >, & 등이 손상될 수 있음이 실기기에서 확인됨 - base64는
+   * 그런 문자가 전혀 없어서 안전하다)
+   */
+  function base64Decode(b64) {
+    var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+    var str = String(b64).replace(/[^A-Za-z0-9\+\/\=]/g, "");
+    var output = [];
+    var enc1, enc2, enc3, enc4;
+    var i = 0;
+
+    while (i < str.length) {
+      enc1 = chars.indexOf(str.charAt(i++));
+      enc2 = chars.indexOf(str.charAt(i++));
+      enc3 = chars.indexOf(str.charAt(i++));
+      enc4 = chars.indexOf(str.charAt(i++));
+
+      var chr1 = (enc1 << 2) | (enc2 >> 4);
+      var chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
+      var chr3 = ((enc3 & 3) << 6) | enc4;
+
+      output.push(String.fromCharCode(chr1));
+      if (enc3 !== 64) output.push(String.fromCharCode(chr2));
+      if (enc4 !== 64) output.push(String.fromCharCode(chr3));
+    }
+
+    var byteStr = output.join("");
+    var result = "";
+    var j = 0;
+    while (j < byteStr.length) {
+      var c1 = byteStr.charCodeAt(j);
+      if (c1 < 0x80) {
+        result += String.fromCharCode(c1);
+        j++;
+      } else if (c1 >= 0xC0 && c1 < 0xE0) {
+        var c2 = byteStr.charCodeAt(j + 1);
+        result += String.fromCharCode(((c1 & 0x1F) << 6) | (c2 & 0x3F));
+        j += 2;
+      } else if (c1 >= 0xE0 && c1 < 0xF0) {
+        var c2b = byteStr.charCodeAt(j + 1);
+        var c3b = byteStr.charCodeAt(j + 2);
+        result += String.fromCharCode(((c1 & 0x0F) << 12) | ((c2b & 0x3F) << 6) | (c3b & 0x3F));
+        j += 3;
+      } else {
+        var c2c = byteStr.charCodeAt(j + 1);
+        var c3c = byteStr.charCodeAt(j + 2);
+        var c4c = byteStr.charCodeAt(j + 3);
+        var codepoint = ((c1 & 0x07) << 18) | ((c2c & 0x3F) << 12) | ((c3c & 0x3F) << 6) | (c4c & 0x3F);
+        codepoint -= 0x10000;
+        result += String.fromCharCode(0xD800 + (codepoint >> 10), 0xDC00 + (codepoint & 0x3FF));
+        j += 4;
+      }
+    }
+    return result;
+  }
+
+  return { getJson: getJson, getJsonFromUrl: getJsonFromUrl, getRawText: getRawText, inspect: inspect, base64Decode: base64Decode };
 })();
 
 // ---- API 응답 파싱 공통 헬퍼 (commands/*.js가 공용으로 씀) ----
@@ -1625,7 +1733,11 @@ var GoombaBotConfig = {
   // 통째로 붙여넣은 예전 방식이면 이 명령어는 반영 확인만 해주고 실제로는 안 바뀐다
   // (자세한 원리는 loader.js와 commands/botcontrol.js 주석 참고).
   // 예: "https://raw.githubusercontent.com/사용자명/저장소명/main/main.js"
-  githubMainJsRawUrl: "https://raw.githubusercontent.com/schl410-hub/GoombaBot/main/main.js"
+  // ⚠️ main.js가 아니라 main.js.b64(base64 인코딩본)를 가리켜야 한다 - jsoup이 응답을
+  // HTML로 취급해서 순수 JS 코드가 손상되는 문제가 실기기에서 확인됐다 (자세한 설명은
+  // loader.js 상단 주석 참고).
+  // 예: "https://raw.githubusercontent.com/사용자명/저장소명/main/main.js.b64"
+  githubMainJsRawUrl: "https://raw.githubusercontent.com/schl410-hub/GoombaBot/main/main.js.b64"
 };
 
 module.exports = {
