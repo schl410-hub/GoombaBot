@@ -1,35 +1,92 @@
 /**
  * loader.js
- * ----------
- * ⚠️ 이 파일이 메신저봇R 스크립트 편집 화면에 붙여넣는 "유일한" 파일입니다.
- * 이후로는 이 파일을 다시 건드릴 일이 없어야 합니다 - 모든 실제 로직은
- * GitHub의 main.js에서 관리하고, 이 로더가 그걸 받아와서 실행합니다.
- *
- * 동작 원리:
- *   1) GoombaBotRuntime이라는 빈 그릇을 하나 만든다 (전역).
- *   2) 안정적인 리스너(Event.COMMAND / Event.TICK)를 "딱 한 번" 등록한다. 이 리스너는
- *      실제 로직을 담고 있지 않고, 그때그때 GoombaBotRuntime.dispatchCommand/dispatchTick를
- *      찾아서 위임만 한다 - 그래서 나중에 GoombaBotRuntime 안의 내용이 바뀌어도
- *      리스너를 다시 등록할 필요가 없다 (중복 리스너로 명령어가 두 번 응답하는 문제 방지).
- *   3) GitHub의 main.js를 받아와서 간접 eval로 실행한다 - 간접 eval은 항상 "전역 스코프"에서
- *      실행되기 때문에(직접 eval과 다름, ECMAScript 명세), main.js 안의 모든 내용이
- *      이 로더와 같은 전역 공간에 자리잡는다.
- *   4) 이후 "!굼바봇 업데이트" 명령어가 같은 방식(간접 eval)으로 GitHub의 최신 main.js를
- *      다시 받아와서 실행하면, GoombaBotRuntime의 내용이 새 것으로 교체된다 - 봇을
- *      재시작하지 않고도 실시간으로 반영된다.
- *
- * ⚠️ 정직하게 말씀드리면, 이 메커니즘은 JavaScript 명세(간접 eval의 스코프 규칙)를
- * 근거로 설계했고 Node.js로 재현 검증까지 했지만, 실제 메신저봇R(Rhino)에서 100%
- * 똑같이 동작하는지는 확인하지 못했습니다 - 실기기 테스트가 꼭 필요합니다.
+ * -----------
+ * 이 파일을 메신저봇R에 딱 한 번만 붙여넣으면 됩니다. 이후로는 다시 건드릴 필요가
+ * 없습니다 - 실제 기능(명령어 등)은 전부 GitHub에서 자동으로 받아옵니다.
  */
 
-// TODO: 실제 GitHub raw main.js 주소로 교체해주세요.
-// 예: "https://raw.githubusercontent.com/사용자명/저장소명/main/main.js"
-var GOOMBABOT_MAIN_JS_URL = "https://raw.githubusercontent.com/schl410-hub/GoombaBot/main/main.js";
+var GOOMBABOT_MAIN_JS_B64_URL = "https://raw.githubusercontent.com/schl410-hub/GoombaBot/main/main.js.b64";
+var GOOMBABOT_REPORT_ROOM = "라쿤 모비노기 길드방";
 
 var GoombaBotRuntime = {};
 
-function goombaLoaderFetchAndApply(url) {
+function goombaBase64Decode(b64) {
+  var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+  var str = String(b64).replace(/[^A-Za-z0-9\+\/\=]/g, "");
+  var output = [];
+  var enc1, enc2, enc3, enc4;
+  var i = 0;
+
+  while (i < str.length) {
+    enc1 = chars.indexOf(str.charAt(i++));
+    enc2 = chars.indexOf(str.charAt(i++));
+    enc3 = chars.indexOf(str.charAt(i++));
+    enc4 = chars.indexOf(str.charAt(i++));
+
+    var chr1 = (enc1 << 2) | (enc2 >> 4);
+    var chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
+    var chr3 = ((enc3 & 3) << 6) | enc4;
+
+    output.push(String.fromCharCode(chr1));
+    if (enc3 !== 64) output.push(String.fromCharCode(chr2));
+    if (enc4 !== 64) output.push(String.fromCharCode(chr3));
+  }
+
+  var byteStr = output.join("");
+  var result = "";
+  var j = 0;
+  while (j < byteStr.length) {
+    var c1 = byteStr.charCodeAt(j);
+    if (c1 < 0x80) {
+      result += String.fromCharCode(c1);
+      j++;
+    } else if (c1 >= 0xC0 && c1 < 0xE0) {
+      var c2 = byteStr.charCodeAt(j + 1);
+      result += String.fromCharCode(((c1 & 0x1F) << 6) | (c2 & 0x3F));
+      j += 2;
+    } else if (c1 >= 0xE0 && c1 < 0xF0) {
+      var c2b = byteStr.charCodeAt(j + 1);
+      var c3b = byteStr.charCodeAt(j + 2);
+      result += String.fromCharCode(((c1 & 0x0F) << 12) | ((c2b & 0x3F) << 6) | (c3b & 0x3F));
+      j += 3;
+    } else {
+      var c2c = byteStr.charCodeAt(j + 1);
+      var c3c = byteStr.charCodeAt(j + 2);
+      var c4c = byteStr.charCodeAt(j + 3);
+      var codepoint = ((c1 & 0x07) << 18) | ((c2c & 0x3F) << 12) | ((c3c & 0x3F) << 6) | (c4c & 0x3F);
+      codepoint -= 0x10000;
+      result += String.fromCharCode(0xD800 + (codepoint >> 10), 0xDC00 + (codepoint & 0x3FF));
+      j += 4;
+    }
+  }
+  return result;
+}
+
+function goombaFetchViaJavaUrlConnection(url) {
+  var javaUrl = new Packages.java.net.URL(String(url));
+  var conn = javaUrl.openConnection();
+  conn.setConnectTimeout(15000);
+  conn.setReadTimeout(15000);
+  conn.setRequestProperty(
+    "User-Agent",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+  );
+  var inputStream = conn.getInputStream();
+  var reader = new Packages.java.io.BufferedReader(new Packages.java.io.InputStreamReader(inputStream, "UTF-8"));
+  var sb = new Packages.java.lang.StringBuilder();
+  var line = reader.readLine();
+  var isFirst = true;
+  while (line !== null) {
+    if (!isFirst) sb.append("\n");
+    sb.append(line);
+    isFirst = false;
+    line = reader.readLine();
+  }
+  reader.close();
+  return String(sb.toString());
+}
+
+function goombaFetchViaHttpRequestSync(url) {
   var doc = Http.requestSync({
     url: String(url),
     method: "GET",
@@ -38,34 +95,100 @@ function goombaLoaderFetchAndApply(url) {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     }
   });
-  var code = doc.body().text();
-  if (!code || code.length < 200) {
-    throw new Error("받아온 코드가 비정상적으로 짧습니다 (" + (code ? code.length : 0) + "자) - URL을 확인해주세요.");
+  try { return String(doc.body().text()); } catch (e1) {}
+  try { return String(doc.text()); } catch (e2) {}
+  return String(doc);
+}
+
+function goombaLoaderFetchAndApply(url, report) {
+  report = report || function () {};
+  var result = { success: false, error: null, length: 0 };
+
+  // ⚠️ raw.githubusercontent.com은 CDN 캐시가 붙어있어서, GitHub에는 새 파일이
+  // 정상적으로 올라가 있어도 캐시가 아직 안 갱신되면 예전 내용을 계속 돌려줄 수 있다
+  // (실기기에서 "!로더업데이트는 성공했다는데 !버전은 그대로"인 현상으로 확인됨).
+  // 매번 URL 끝에 현재 시각을 붙여서 완전히 새로운 요청으로 취급되게 만들어 캐시를 우회한다.
+  var cacheBustedUrl = String(url) + (String(url).indexOf("?") === -1 ? "?" : "&") + "_cb=" + new Date().getTime();
+
+  var b64Text = null;
+  try {
+    b64Text = goombaFetchViaJavaUrlConnection(cacheBustedUrl);
+  } catch (javaError) {
+    try {
+      b64Text = goombaFetchViaHttpRequestSync(cacheBustedUrl);
+    } catch (httpError) {
+      result.error = "다운로드 실패";
+      report(result.error);
+      return result;
+    }
   }
-  // ⚠️ 반드시 간접 eval (eval을 변수에 담아서 호출) - 직접 eval(code)이라고 쓰면 이 함수의
-  // 지역 스코프에만 반영되고 함수가 끝나는 순간 사라져서 아무 효과가 없다.
-  var indirectEval = eval;
-  indirectEval(code);
+
+  if (!b64Text || b64Text.length < 100) {
+    result.error = "받아온 코드가 비정상적으로 짧습니다";
+    report(result.error);
+    return result;
+  }
+
+  var code;
+  try {
+    code = goombaBase64Decode(b64Text);
+  } catch (decodeError) {
+    result.error = "코드 적용 실패";
+    report(result.error);
+    return result;
+  }
+  if (!code || code.length < 200) {
+    result.error = "코드가 비정상적으로 짧습니다";
+    report(result.error);
+    return result;
+  }
+  result.length = code.length;
+
+  try {
+    var indirectEval = eval;
+    indirectEval(code);
+  } catch (evalError) {
+    result.error = "코드 적용 중 오류 (기존 상태 유지됨)";
+    report(result.error);
+    return result;
+  }
+
+  if (typeof GoombaBotRuntime.dispatchCommand !== "function") {
+    result.error = "코드가 올바르지 않습니다";
+    report(result.error);
+    return result;
+  }
+
+  result.success = true;
+  return result;
 }
 
 var goombaBot = BotManager.getCurrentBot();
+goombaBot.setCommandPrefix("!");
 
-// 안정적인 래퍼 - 절대 다시 등록되지 않는다. 실제 로직은 매번 새로 조회한다.
+function goombaReportToRoom(message) {
+  try { if (GOOMBABOT_REPORT_ROOM) goombaBot.send(GOOMBABOT_REPORT_ROOM, message); } catch (sendError) {}
+  try { Log.i("GoombaBotLoader", message); } catch (logError) {}
+}
+
 goombaBot.addListener(Event.COMMAND, function (chat) {
+  if (chat.command === "로더업데이트") {
+    var r = goombaLoaderFetchAndApply(GOOMBABOT_MAIN_JS_B64_URL, function (step) { chat.reply(step); });
+    chat.reply(r.success ? "\uD83D\uDD27 업데이트 완료" : "\u274C 업데이트 실패: " + r.error);
+    return;
+  }
   if (GoombaBotRuntime.dispatchCommand) GoombaBotRuntime.dispatchCommand(chat);
 });
+
 goombaBot.addListener(Event.TICK, function () {
   if (GoombaBotRuntime.dispatchTick) GoombaBotRuntime.dispatchTick();
 });
 
-// 최초 실행 - GitHub의 main.js를 받아와서 적용한다.
 try {
-  if (!GOOMBABOT_MAIN_JS_URL) {
-    Log.i("GoombaBotLoader", "GOOMBABOT_MAIN_JS_URL이 비어있습니다 - 최초 코드가 로드되지 않았습니다.");
-  } else {
-    goombaLoaderFetchAndApply(GOOMBABOT_MAIN_JS_URL);
-    Log.i("GoombaBotLoader", "최초 로드 완료");
-  }
-} catch (e) {
-  Log.i("GoombaBotLoader", "최초 로드 실패: " + e);
+  var goombaInitialResult = goombaLoaderFetchAndApply(GOOMBABOT_MAIN_JS_B64_URL, function () {});
+  goombaReportToRoom(goombaInitialResult.success
+    ? "\uD83C\uDF44 굼바봇이 시작됐습니다!"
+    : "\u26A0\uFE0F 굼바봇 시작 실패: " + goombaInitialResult.error + "\n(\"!로더업데이트\"로 다시 시도할 수 있습니다)");
+} catch (topLevelError) {
+  try { Log.i("GoombaBotLoader", "최초 실행 중 오류: " + topLevelError); } catch (ignore) {}
 }

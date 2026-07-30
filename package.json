@@ -2,9 +2,9 @@
   "name": "goombabot",
   "version": "1.0.0",
   "private": true,
-  "description": "마비노기 모바일 카카오톡 봇 (메신저봇R API2). src/는 GitHub 관리용, main.js는 빌드 산출물",
+  "description": "마비노기 모바일 카카오톡 봇 (메신저봇R API2)",
   "scripts": {
-    "build": "browserify src/index.js -o main.js",
+    "build": "browserify src/index.js -o main.js && node scripts/build-base64.js",
     "verify": "node scripts/verify-es5.js main.js"
   },
   "devDependencies": {
