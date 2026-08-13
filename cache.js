@@ -1,24 +1,52 @@
-{
-  "화염술사": [
-    "A: 421 31115 / 3단계 진입 시 113 15 123 5113 13 / 1415 125 1115",
-    "B: 113 15 123 5113 13 / 3단계 진입 시 사이클",
-    "C: 1415 125 115",
-    "D: 6 313 24 31 113 15 평 13",
-    "평상시 ABCBC~ 식 반복, 궁 사용 시 DCBC~ 식 반복"
-  ],
-  "힐러": [
-    "기본: 51433 433 (반복)",
-    "5스, 4스는 콜 돌아올 때마다 3스 쓰기 전에 사용"
-  ],
-  "악사": [
-    "기본(조순매 기준): 331435 → 1425 (반복)",
-    "무드 많이 찼을 때: 435 → 1425",
-    "상황에 따라: 335 → 1425"
-  ],
-  "대검전사": [
-    "기본: 1435",
-    "콜감 세공 부족 시: 3145",
-    "3소 콜일 경우: 1345 또는 1435",
-    "그래도 콜이 부족하면: 1425"
-  ]
-}
+
+/**
+ * core/cache.js
+ * --------------
+ * Database API(메신저봇R API2) 기반 캐시 저장소(GoombaBot.storage)를 담당한다.
+ */
+
+var GoombaBot = require("./config.js").GoombaBot;
+var GoombaBotConfig = require("./config.js").GoombaBotConfig;
+
+GoombaBot.storage = (function () {
+  function toFileName(key) {
+    return GoombaBotConfig.cacheFilePrefix + String(key).replace(/[^a-zA-Z0-9_-]/g, "_");
+  }
+  function read(key, ttlMs) {
+    var fileName = toFileName(key);
+    if (!Database.exists(fileName)) return null;
+    var envelope;
+    try { envelope = Database.readObject(fileName); } catch (e) { return null; }
+    if (!envelope || typeof envelope.syncedAt !== "number") return null;
+    if (Date.now() - envelope.syncedAt > ttlMs) return null;
+    return envelope.data;
+  }
+  function readStale(key) {
+    var fileName = toFileName(key);
+    if (!Database.exists(fileName)) return null;
+    try {
+      var envelope = Database.readObject(fileName);
+      return envelope ? envelope.data : null;
+    } catch (e) { return null; }
+  }
+  function write(key, data) {
+    Database.writeObject(toFileName(key), { syncedAt: Date.now(), data: data });
+  }
+  function getSyncedAt(key) {
+    var fileName = toFileName(key);
+    if (!Database.exists(fileName)) return null;
+    try {
+      var envelope = Database.readObject(fileName);
+      return envelope && envelope.syncedAt ? envelope.syncedAt : null;
+    } catch (e) { return null; }
+  }
+  /** !굼바봇 재시작 등에서 캐시를 강제로 비울 때 쓴다. Database.remove가 없는 환경일 수도
+   * 있어 방어적으로 try/catch 한다 (실패해도 조용히 넘어감 - 다음 TTL 만료 때 갱신됨). */
+  function remove(key) {
+    try { Database.remove(toFileName(key)); return true; } catch (e) { return false; }
+  }
+  return { read: read, readStale: readStale, write: write, getSyncedAt: getSyncedAt, remove: remove };
+})();
+
+module.exports = { GoombaBot: GoombaBot };
+

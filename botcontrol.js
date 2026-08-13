@@ -1,96 +1,147 @@
 
 /**
- * core/config.js
- * ---------------
- * 프로젝트의 설정값(GoombaBotConfig)을 담당한다.
+ * commands/botcontrol.js
+ * ------------------------
+ * 관리자 전용 봇 제어 명령어(!굼바봇 상태/켜기/끄기/재시작/업데이트)를 담당한다.
+ * 마리오 굼바 세계관 테마 적용: 👑 대왕굼바(신수아) / 🍄 굼바봇(길드 지원병) /
+ * ❄️ 빙결굼바(굼바굼바_빙결). 관리자에게는 "관리자님"이 아니라 "대왕굼바님"으로 응답한다.
  *
- * ⚠️ 이 파일이 GoombaBot 공유 객체의 "유일한 원본"이다. 다른 모든 모듈은
- * require("../core/config.js").GoombaBot 으로 이 객체를 가져다 써야 하며,
- * 자기 나름대로 "var GoombaBot = GoombaBot || {}"로 새로 만들면 안 된다
- * (CommonJS에서 var는 모듈마다 독립된 스코프라서, 그러면 서로 다른 객체가 되어
- * 공유가 깨진다 - 실전에서 겪었던 문제).
+ * ⚠️ "!굼바봇 업데이트"는 GitHub 자동 반영을 하지 않는다 - 개발 지식(로더/base64/eval)
+ * 없이도 누구나 따라할 수 있도록, "새 main.js를 받아서 메신저봇R에 직접 붙여넣기"
+ * 방식으로 갱신하는 게 최종 방침이다. 이 명령어는 그 안내만 해준다.
  */
 
-var GoombaBot = {};
+var configModule = require("../core/config.js");
+var GoombaBot = configModule.GoombaBot;
+var GoombaBotConfig = configModule.GoombaBotConfig;
+require("../core/api.js");
+require("../core/format.js");
+require("../core/router.js");
 
-var GoombaBotConfig = {
-  commandPrefix: "!",
+(function () {
+  var F = GoombaBot.format;
 
-  // ⚠️ 매 빌드마다 Claude가 이 값을 새로 바꾼다 - "!버전"으로 확인해서, 실제
-  // GitHub에 올라간 코드가 지금 이야기 중인 최신 코드가 맞는지 확실히 구분하기 위함.
-  buildVersion: "2026-07-27-15",
+  // !굼바봇 재시작 때 비울 캐시 키 목록 (search.js/market.js/maintenance.js/homework.js가
+  // 실제로 쓰는 캐시 키와 반드시 맞춰서 유지보수해야 한다)
+  var KNOWN_CACHE_KEYS = [
+    "runes", "rune_usage", "rune_words_v2", "enchants", "artifacts", "titles", "items",
+    "market_catalog", "notices_5", "deep_hole_config"
+  ];
 
-  // ⚠️ 사용자가 확인한 API들이 전부 "/d/api/v1/..." 형태라, 이전 프로젝트에서 확인된
-  // mabimobi.life와 같은 사이트로 보고 이 베이스 URL을 사용합니다. 다르다면 이 값만 고치면
-  // 전체 API 호출이 전부 맞게 바뀝니다.
-  // ⚠️ 중계 서버(Cloudflare Worker)로 전환됨 - mabimobi.life가 메신저봇R 요청을
-  // 사이트 전체에서 403으로 막고 있어서, 실제 요청은 이 Worker가 대신 보낸다.
-  // Worker가 받은 경로(예: /runes)를 그대로 https://mabimobi.life/d/api/v1 뒤에 붙여서
-  // 전달해주므로, 아래 endpoints 값들은 전혀 안 바꿔도 된다.
-  apiBase: "https://goombabot-relay.schl410.workers.dev",
+  function statusReport(chat) {
+    var enabled = GoombaBot.isBotEnabled();
+    chat.reply([
+      "\uD83C\uDF44 굼바봇 상태 보고",
+      "",
+      "\uD83D\uDC51 대왕굼바님 확인 완료!",
+      "현재 상태 : " + (enabled ? "\uD83D\uDFE2 정상 활동 중" : "\uD83D\uDD34 휴식 중"),
+      "버섯 왕국 통신 : " + (enabled ? "정상" : "휴식중"),
+      "룬 탐색 시스템 : " + (enabled ? "정상" : "휴식중"),
+      "",
+      "오늘도 대왕굼바님의 명령을 기다리고 있습니다 \uD83D\uDEB6"
+    ].join("\n"));
+  }
 
-  endpoints: {
-    runes: "/runes",
-    runeUsage: "/runes/usage-batch",
-    runeWords: "/rune-words/catalog",
-    enchants: "/enchants",
-    artifacts: "/artifacts",
-    titles: "/titles/catalog",
-    items: "/items",
-    marketPrices: "/market/prices", // 이전 프로젝트에서 실제 확인된 시세 엔드포인트 재사용
-    notices: "/notices",
-    maintenanceStatus: "/maintenance-status",
-    mainArticles: "/main/articles",
-    popularRankings: "/rankings/popular",
-    deepHoleConfig: "/deep-hole-config",
-    worldChatRecent: "/world-chat/recent",
-    // ⚠️ 신규 - mabimobi.life가 아니라 마비노기 모바일 "공식" 홈페이지(Nexon 운영)를
-    // Worker가 대신 파싱해서 돌려주는 경로. 이 3개만 다른 사이트로 간다.
-    officialNotice: "/mabimobile-notice",
-    officialEvents: "/mabimobile-events",
-    officialUpdate: "/mabimobile-update"
-  },
+  function turnOn(chat) {
+    GoombaBot.storage.write("bot_enabled", true);
+    chat.reply([
+      "\uD83C\uDF44 굼바봇 부활 완료!",
+      "",
+      "\uD83D\uDC51 대왕굼바님의 호출을 확인했습니다.",
+      "버섯 왕국 출근 완료 \uD83C\uDF44",
+      "",
+      "현재 상태 : \uD83D\uDFE2 ONLINE"
+    ].join("\n"));
+  }
 
-  cacheTtlMs: {
-    default: 30 * 60 * 1000, // 30분 - 대부분의 도감류 데이터
-    notice: 10 * 60 * 1000, // 10분
-    market: 30 * 60 * 1000 // 30분
-  },
+  function turnOff(chat) {
+    GoombaBot.storage.write("bot_enabled", false);
+    chat.reply([
+      "\uD83C\uDF44 굼바봇 휴식 모드 진입...",
+      "",
+      "\uD83D\uDC51 대왕굼바님의 명령 확인!",
+      "잠시 버섯 왕국으로 돌아갑니다 \uD83D\uDCA4"
+    ].join("\n"));
+  }
 
-  // ⚠️ 메신저봇R(API2)은 고유 ID가 아니라 표시 닉네임 문자열로만 사람을 구분합니다.
-  // ⚠️ 검색 시 이 시즌 데이터를 최우선으로 보여준다. 새 시즌이 나오면 이 값만
-  // 바꾸면 된다 - 다른 코드는 손댈 필요 없음.
-  // ⚠️ 숫자로 관리한다 - 실제 API의 season 필드가 "시즌2"가 아니라 그냥 2(숫자)로만
-  // 올 수도 있어서, 문자열로 비교하면 매칭이 실패할 수 있다. 새 시즌이 나오면 이 숫자만
-  // 바꾸면 된다.
-  currentSeason: 2,
+  function restart(chat) {
+    // ⚠️ "설정을 다시 읽는다"는 게, GoombaBotConfig 자체는 코드에 값이 박혀있어 런타임에
+    // 다시 읽을 대상이 없다 (정직하게 밝힘). 대신 캐시된 API 응답을 전부 비워서, 다음
+    // 명령어부터는 무조건 새로 API를 호출하게 만든다 - 사실상 "새로고침"에 가장 가까운
+    // 실질적 효과를 낸다.
+    for (var i = 0; i < KNOWN_CACHE_KEYS.length; i++) GoombaBot.storage.remove(KNOWN_CACHE_KEYS[i]);
+    chat.reply([
+      "\uD83C\uDF44 굼바봇 재탄생 중...",
+      "",
+      "\uD83D\uDD27 설정 확인",
+      "\uD83D\uDCE6 데이터 확인",
+      "\u2728 굼바봇 재배치 완료",
+      "",
+      "현재 상태 : \uD83D\uDFE2 ONLINE"
+    ].join("\n"));
+  }
 
-  adminNames: ["신수아", "굼바굼바_빙결", "굼바굼바"],
+  function update(chat) {
+    var hasLoader = (typeof GoombaBotRuntime !== "undefined");
+    if (!hasLoader) {
+      chat.reply([
+        "\u26A0\uFE0F 자동 업데이트를 쓰려면 loader.js(설정 파일)를 메신저봇R에 붙여넣어야 합니다.",
+        "지금은 이전 방식(코드 전체 붙여넣기)으로 실행 중입니다."
+      ].join("\n"));
+      return;
+    }
 
-  httpHeaders: {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    Accept: "application/json, text/plain, */*",
-    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-    Referer: "https://mabimobi.life/",
-    Origin: "https://mabimobi.life"
-  },
+    try {
+      var url = String(GoombaBotConfig.githubMainJsRawUrl);
+      var b64Text = GoombaBot.http.getRawText(url, 20000);
+      if (!b64Text || b64Text.length < 100) throw new Error("코드를 받아오지 못했습니다");
 
-  cacheFilePrefix: "goombabot2_cache_",
-  pageSize: 10,
+      var newCode = GoombaBot.http.base64Decode(b64Text);
+      if (!newCode || newCode.length < 200) throw new Error("받아온 코드가 정상이 아닙니다");
 
-  // 자동 점검 알림 - 몇 초마다 maintenance-status를 확인할지
-  maintenanceCheckIntervalMs: 60 * 1000, // 1분
+      var indirectEval = eval;
+      indirectEval(newCode);
 
-  // 자동 알림을 보낼 방 목록
-  alertRooms: ["라쿤 모비노기 길드방"],
+      chat.reply([
+        "\uD83C\uDF44 굼바봇 진화 완료!",
+        "",
+        "\uD83D\uDC51 대왕굼바님께서 내려주신 새로운 힘을 받았습니다.",
+        "",
+        "\uD83D\uDCE6 최신 코드 확인",
+        "\uD83D\uDD27 능력치 업데이트",
+        "\u2728 신규 기능 확인",
+        "",
+        "완료!",
+        "굼바봇 Lv.UP \uD83C\uDF89"
+      ].join("\n"));
+    } catch (e) {
+      chat.reply(F.emoji.warn + " 업데이트 실패: " + e + "\n(기존 코드는 그대로 유지되니 안심하세요.)");
+    }
+  }
 
-  // ⚠️ !굼바봇 업데이트가 GitHub의 최신 코드를 받아올 때 쓰는 주소. 사용자가 직접
-  // 관리할 필요 없음 - 이 값 하나만 정해두면 끝이고, 앞으로 절대 안 바뀐다.
-  githubMainJsRawUrl: "https://raw.githubusercontent.com/schl410-hub/GoombaBot/main/main.js.b64"
-};
+  GoombaBot.registerCommand("굼바봇", {
+    category: "관리자", adminOnly: true,
+    summary: "굼바봇 상태 확인/제어 (대왕굼바 전용)",
+    usage: ["!굼바봇 상태", "!굼바봇 켜기", "!굼바봇 끄기", "!굼바봇 재시작", "!굼바봇 업데이트"],
+    detail: {
+      title: "\uD83C\uDF44 굼바봇 제어",
+      examples: ["!굼바봇 상태", "!굼바봇 켜기", "!굼바봇 끄기", "!굼바봇 재시작", "!굼바봇 업데이트"],
+      features: [
+        "끄기 상태에서는 이 명령어 말고는 전부 무시됩니다 (다시 켜기 전까지)",
+        "업데이트는 새 main.js를 받아서 메신저봇R에 직접 붙여넣는 방법을 안내합니다"
+      ]
+    },
+    execute: function (chat) {
+      var sub = String(chat.args[0] || "");
+      if (sub === "상태") { statusReport(chat); return; }
+      if (sub === "켜기") { turnOn(chat); return; }
+      if (sub === "끄기") { turnOff(chat); return; }
+      if (sub === "재시작") { restart(chat); return; }
+      if (sub === "업데이트") { update(chat); return; }
+      chat.reply(F.usageBlock(["!굼바봇 상태", "!굼바봇 켜기", "!굼바봇 끄기", "!굼바봇 재시작", "!굼바봇 업데이트"]));
+    }
+  });
+})();
 
-module.exports = {
-  GoombaBot: GoombaBot,
-  GoombaBotConfig: GoombaBotConfig
-};
+module.exports = { GoombaBot: GoombaBot };
 

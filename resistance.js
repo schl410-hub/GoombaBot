@@ -1,400 +1,294 @@
 
 /**
- * core/api.js
- * ------------
- * Http.requestSync() 공통 래퍼(GoombaBot.http) + API 응답 파싱 공통 헬퍼
- * (toArray/extractField/fetchCached)를 담당한다.
+ * commands/resistance.js
+ * -------------------------
+ * 마도 저항 계산기(!마도저항, !마저) - 과거 세션에서 실제로 구현했던 기능을
+ * 트랜스크립트에서 찾아 그대로 복원한 것. 새로 만든 공식이 아니다.
  *
- * 실전에서 실제로 겪었던 Rhino 버그 2종을 미리 방어한다:
- *   1) ConsString 문제: Rhino에서 문자열을 "+"로 이어붙이면 java.lang.String이 아니라
- *      org.mozilla.javascript.ConsString이 되는데, 이걸 그대로 Http.requestSync에
- *      넘기면 ClassCastException이 납니다 -> url/method/header 값을 전부 String()으로
- *      강제 변환합니다.
- *   2) JavaException 래퍼 문제: Rhino가 자바 예외를 자기 것으로 한 번 더 감싸서 던지는데,
- *      감싸인 안쪽의 진짜 예외(예: HttpStatusException)에만 getStatusCode() 등이 있어서
- *      겉 포장에 대고 호출하면 못 찾습니다 -> getWrappedException()으로 벗겨서 검사합니다.
+ * ⚠️ 공식 출처: 나무위키 "마비노기 모바일/능력치" 문서에 문서화된 공식
+ * (Nexon 공식 발표 자료가 아니라 커뮤니티 문서) - 참고용으로만 사용.
+ *   공격 최종대미지: 저항<압력 → 0.5^((압력-저항)/1000) | 저항=압력 → 100%
+ *                    | 저항>압력 → 1.4-0.4*0.5^((저항-압력)/10000)
+ *   피격 최종대미지: 저항<압력 → 1+(((압력-저항)/1000)^0.75) | 저항>=압력 → 100%
+ * 두 값(내 마도 저항, 콘텐츠의 마도 압력)이 둘 다 있어야 계산할 수 있다 -
+ * 값 하나만으로는 계산이 안 되는 공식이라 인자 2개가 필수다.
  */
 
-var GoombaBot = require("./config.js").GoombaBot;
-var GoombaBotConfig = require("./config.js").GoombaBotConfig;
-require("./cache.js"); // GoombaBot.storage가 붙도록 로드만 시켜둠
+var GoombaBot = require("../core/config.js").GoombaBot;
+require("../core/format.js");
+require("../core/router.js");
 
-GoombaBot.log = function (message) {
-  try { Log.i("GoombaBot", message); } catch (e) {}
-};
+(function () {
+  var F = GoombaBot.format;
 
-GoombaBot.http = (function () {
-  var DEFAULT_TIMEOUT_MS = 9000;
-  // ⚠️ 실기기 !진단 1에서 /runes가 timeout(JSON 파싱 문제가 아니라 요청 자체가 시간 안에
-  // 안 끝남)로 확인됨 - 데이터양이 많은 룬처럼 무거운 응답을 위해 더 긴 타임아웃을 쓴다.
-  var HEAVY_TIMEOUT_MS = 20000;
-
-  function mergeHeaders(overrides) {
-    var merged = {}, key;
-    for (key in GoombaBotConfig.httpHeaders) {
-      if (GoombaBotConfig.httpHeaders.hasOwnProperty(key)) merged[key] = String(GoombaBotConfig.httpHeaders[key]);
-    }
-    if (overrides) {
-      for (key in overrides) { if (overrides.hasOwnProperty(key)) merged[key] = String(overrides[key]); }
-    }
-    return merged;
+  function calcAttackFinalDamagePct(resistance, pressure) {
+    if (resistance < pressure) return Math.pow(0.5, (pressure - resistance) / 1000) * 100;
+    if (resistance === pressure) return 100;
+    return (1.4 - 0.4 * Math.pow(0.5, (resistance - pressure) / 10000)) * 100;
+  }
+  function calcHitFinalDamagePct(resistance, pressure) {
+    if (resistance < pressure) return (1 + Math.pow((pressure - resistance) / 1000, 0.75)) * 100;
+    return 100;
   }
 
-  function extractBodyText(doc) {
-    var attempts = [];
-    try {
-      var t1 = doc.body().text();
-      attempts.push({ method: "doc.body().text()", value: t1 });
-      if (t1 && (t1.charAt(0) === "{" || t1.charAt(0) === "[")) return { text: t1, method: "doc.body().text()" };
-    } catch (e1) {}
-    try {
-      var t2 = doc.text();
-      attempts.push({ method: "doc.text()", value: t2 });
-      if (t2 && (t2.charAt(0) === "{" || t2.charAt(0) === "[")) return { text: t2, method: "doc.text()" };
-    } catch (e2) {}
-    try {
-      var t3 = String(doc);
-      attempts.push({ method: "String(doc)", value: t3 });
-      if (t3 && (t3.indexOf("{") !== -1 || t3.indexOf("[") !== -1)) return { text: t3, method: "String(doc)" };
-    } catch (e3) {}
-    return { text: attempts.length > 0 ? attempts[0].value : "", method: attempts.length > 0 ? attempts[0].method : "(모두 실패)", attempts: attempts };
+  // ⚠️ 길드원 대부분이 "룬다 지옥1" 기준으로 계산한다는 요청으로 기본 압력값을 둔다.
+  // 계산 공식 자체는 전혀 안 바뀌었고, 압력을 안 넣었을 때만 이 값을 대신 쓴다.
+  var DEFAULT_PRESSURE = 4400; // 룬다 지옥1 마도 압력
+  var DEFAULT_PRESSURE_LABEL = "룬다 지옥1";
+
+  // ⚠️ 실기기 스크린샷(ErinnData 사이트 A=4,400/B=7,200 두 지점)으로 역산해서 확정한
+  // 콘텐츠별 내부 압력표. 오차 전부 ±0.1%p 이내로 검증됨(공격 최종대미지 공식 기준).
+  // "지옥2~4"/"카브락 어려움"은 ErinnData 사이트에도 "(예상)"으로 표기된 미공개 추정치.
+  var CONTENT_PRESSURES = [
+    { key: "abyss_intro", label: "어비스 입문", pressure: 1000 },
+    { key: "abyss_hard", label: "어비스 어려움", pressure: 1600 },
+    { key: "abyss_veryhard", label: "어비스 매우 어려움", pressure: 2700 },
+    { key: "abyss_veryhard2", label: "어비스 매우 어려움 2", pressure: 3000 },
+    { key: "abyss_hell1", label: "어비스 지옥1", pressure: 4400 },
+    { key: "abyss_hell2", label: "어비스 지옥2", pressure: 7200, estimated: true },
+    { key: "abyss_hell3", label: "어비스 지옥3", pressure: 8600, estimated: true },
+    { key: "abyss_hell4", label: "어비스 지옥4", pressure: 10000, estimated: true },
+    { key: "kabrak_intro", label: "카브락 입문", pressure: 2500 },
+    { key: "kabrak_hard", label: "카브락 어려움", pressure: 3700, estimated: true }
+  ];
+  var ERINNDATA_NOTE = "\uD83D\uDCCC 공격 최종대미지(주는 피해)는 ErinnData 계산기 스크린샷으로 검증됨. 피격 최종대미지(받는 피해)는 나무위키 출처라 ErinnData와 대조 확인 전임";
+
+  // ⚠️ "쿠짱봇 스타일" 단일 메시지 출력용 - 지옥2~4처럼 "(예상)" 표기가 붙는 미공개
+  // 콘텐츠는 제외하고, 확정된 7개 콘텐츠만 보여준다(사용자 확정). 카브락 어려움은
+  // 예상치이지만 사용자 예시에 포함되어 있어서 포함하되 "(예상)" 표기는 유지한다.
+  var MAIN_DISPLAY_KEYS = ["abyss_intro", "abyss_hard", "abyss_veryhard", "abyss_veryhard2", "abyss_hell1", "kabrak_intro", "kabrak_hard"];
+  var MAIN_DISPLAY_CONTENTS = [];
+  for (var mi = 0; mi < CONTENT_PRESSURES.length; mi++) {
+    if (MAIN_DISPLAY_KEYS.indexOf(CONTENT_PRESSURES[mi].key) !== -1) MAIN_DISPLAY_CONTENTS.push(CONTENT_PRESSURES[mi]);
   }
 
-  function unwrapJavaException(err) {
-    try {
-      if (err && typeof err.getWrappedException === "function") {
-        var inner = err.getWrappedException();
-        if (inner) return inner;
-      }
-    } catch (ignore1) {}
-    try {
-      if (err && err.javaException) return err.javaException;
-    } catch (ignore2) {}
-    return err;
+  // ⚠️ ErinnData 계산기의 프리셋 버튼 값과 동일(+잔영최대/해연최소·7200,
+  // +해연최저·드레케인·8600, +해연최대·10000) - "목표 마저" 구간에서 재사용.
+  var GOAL_TARGETS = [7200, 8600, 10000];
+  // ⚠️ "8→10성 룬 N개" - 룬 하나당 +300(사용자 확정), 최대 4개까지 시뮬레이션.
+  var RUNE_STEPS = [1, 2, 3, 4];
+
+  var SECTION_LINE = "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501";
+
+  function formatContentLineOnly(resistance, content) {
+    var pct = calcAttackFinalDamagePct(resistance, content.pressure) - 100;
+    var sign = pct >= 0 ? "+" : "";
+    return content.label + (content.estimated ? " (예상)" : "") + " : " + sign + pct.toFixed(1) + "%";
   }
 
-  function describeError(err) {
-    var real = unwrapJavaException(err);
-    try {
-      if (real && typeof real.getMessage === "function") return String(real.getMessage());
-    } catch (ignore) {}
-    return String(err);
-  }
-
-  function extractStatusCode(err) {
-    var real = unwrapJavaException(err);
-    try {
-      if (real && typeof real.getStatusCode === "function") return real.getStatusCode();
-    } catch (ignore1) {}
-    try {
-      var msg = describeError(err);
-      var m = msg.match(/status[^\d]{0,10}(\d{3})/i);
-      if (m) return parseInt(m[1], 10);
-    } catch (ignore2) {}
-    return null;
-  }
-
-  function isTimeoutError(err) {
-    return /timeout|timed out/i.test(describeError(err));
-  }
-
-  /** apiBase를 붙이지 않고, 넘겨준 url을 그대로 요청한다 (GitHub 등 외부 URL 확인용) */
-  /**
-   * ⚠️ 실제로 Http.requestSync가 몇 번 호출됐는지 경로별로 누적 집계한다(재시도 포함).
-   * 봇이 켜져있는 동안 계속 누적되며, !속도진단에서 "정말 캐시가 걸려서 API를 다시
-   * 안 부르는지"를 실측으로 보여주는 데 쓴다.
-   */
-  var callCounts = {};
-  function recordCall(url) {
-    var key = String(url).replace(String(GoombaBotConfig.apiBase), "").split("?")[0];
-    callCounts[key] = (callCounts[key] || 0) + 1;
-  }
-
-  function getJsonFromUrl(url, options) {
-    options = options || {};
-    url = String(url);
-    var timeoutMs = options.timeout || DEFAULT_TIMEOUT_MS;
-    var requestOption = {
-      url: String(url),
-      method: String(options.method || "GET"),
-      timeout: timeoutMs,
-      headers: mergeHeaders(options.headers)
-    };
-
-    var doc;
-    try {
-      recordCall(url);
-      doc = Http.requestSync(requestOption);
-    } catch (requestError) {
-      // timeout이면 - 원인이 파싱이 아니라 요청 자체가 늦게 끝나는 것이므로, 더 긴
-      // 타임아웃으로 한 번만 더 시도한다 (일시적 네트워크/업스트림 지연 대응).
-      if (!options._retried && isTimeoutError(requestError)) {
-        GoombaBot.log("[GoombaBot] timeout - 더 긴 대기시간으로 재시도: " + url);
-        return getJsonFromUrl(url, {
-          method: options.method, headers: options.headers,
-          timeout: Math.max(timeoutMs * 2, HEAVY_TIMEOUT_MS),
-          _retried: true
-        });
-      }
-      var statusCode = extractStatusCode(requestError);
-      throw new Error(
-        "[GoombaBot] HTTP 요청 실패" + (statusCode !== null ? " (HTTP " + statusCode + ")" : "") + ": " + url + " - " + describeError(requestError)
-      );
-    }
-
-    var extracted = extractBodyText(doc);
-    try {
-      return JSON.parse(extracted.text);
-    } catch (parseError) {
-      var preview = extracted.text ? String(extracted.text).substring(0, 200) : "(빈 응답)";
-      throw new Error("[GoombaBot] JSON 파싱 실패 (" + extracted.method + "): " + url + " - 응답 미리보기: " + preview);
-    }
-  }
-
-  /** apiBase(중계 서버) 뒤에 path를 붙여서 요청한다 - 대부분의 기존 코드가 쓰는 방식 */
-  function getJson(path, options) {
-    return getJsonFromUrl(String(GoombaBotConfig.apiBase) + String(path), options);
+  /** 룬 교체 섹션 전용 - 현재값 대비 증가량(▲)까지 한 줄에 같이 보여준다 */
+  function formatContentLineWithDelta(newResistance, baseResistance, content) {
+    var newPct = calcAttackFinalDamagePct(newResistance, content.pressure) - 100;
+    var basePct = calcAttackFinalDamagePct(baseResistance, content.pressure) - 100;
+    var deltaPct = newPct - basePct;
+    var sign = newPct >= 0 ? "+" : "";
+    return content.label + (content.estimated ? " (예상)" : "") + " : " + sign + newPct.toFixed(1) + "% (\u25B2" + deltaPct.toFixed(1) + "%)";
   }
 
   /**
-   * !진단 전용 - 추측이 아니라 실제 응답 구조를 그대로 보여준다.
-   * (최상위가 배열인지 객체인지, 객체라면 어떤 키들이 있는지, toArray()가 몇 건을
-   * 뽑아냈는지, 첫 항목의 진짜 필드명이 무엇인지까지 전부 노출한다)
+   * "쿠짱봇 스타일" 출력 - !마저 [저항](압력 생략, 목표/전체/비교 아님) 전용.
+   * 계산식은 calcAttackFinalDamagePct 그대로 재사용 - 새 공식 없음, 출력 형태만 다름.
+   * 분할 전송 없이 한 메시지로 전부 보낸다(사용자 확정). 콘텐츠/목표는 한 줄 표시,
+   * 룬 교체 섹션은 현재 대비 증가량(▲)까지 같이 보여준다(사용자 확정).
    */
-  function inspect(path, timeoutMs) {
-    var url = String(GoombaBotConfig.apiBase) + String(path);
-    var requestOption = { url: String(url), method: "GET", timeout: timeoutMs || DEFAULT_TIMEOUT_MS, headers: mergeHeaders(null) };
+  function buildKuzzangStyleReply(resistance) {
+    var out = [SECTION_LINE, "\uD83D\uDCCA 마도저항 정보", "\u2694 현재 마도저항", String(resistance), SECTION_LINE];
 
-    var doc;
-    try {
-      recordCall(url);
-      doc = Http.requestSync(requestOption);
-    } catch (requestError) {
-      return { ok: false, stage: "request", url: url, statusCode: extractStatusCode(requestError), error: describeError(requestError) };
+    out.push("\uD83D\uDCC8 최종 대미지");
+    for (var i = 0; i < MAIN_DISPLAY_CONTENTS.length; i++) {
+      out.push(formatContentLineOnly(resistance, MAIN_DISPLAY_CONTENTS[i]));
     }
+    out.push(SECTION_LINE);
 
-    var extracted;
-    try {
-      extracted = extractBodyText(doc);
-    } catch (extractError) {
-      return { ok: false, stage: "extract", url: url, error: describeError(extractError) };
+    out.push("\uD83C\uDFAF 목표 마저");
+    for (var g = 0; g < GOAL_TARGETS.length; g++) {
+      var target = GOAL_TARGETS[g];
+      var gap = target - resistance;
+      out.push(String(target) + " \u2192 " + (gap > 0 ? gap + " 부족" : "달성"));
     }
+    out.push(SECTION_LINE);
 
-    var parsed;
-    try {
-      parsed = JSON.parse(extracted.text);
-    } catch (parseError) {
-      var fullText = extracted.text ? String(extracted.text) : "";
-      var head = fullText.substring(0, 200);
-      var tail = fullText.length > 200 ? fullText.substring(Math.max(0, fullText.length - 200)) : "";
-      return {
-        ok: false, stage: "parse", url: url, error: describeError(parseError),
-        bodyLength: fullText.length,
-        bodyHead: fullText ? head : "(빈 응답)",
-        // ⚠️ 끝부분을 같이 보여주는 이유: "Unterminated string literal"은 응답이 중간에
-        // 잘렸을 때(truncation) 전형적으로 나는 에러라, 끝이 정상적으로 "}"나 "]"로
-        // 안 끝나고 문자열 중간에서 뚝 끊겨있는지 여기서 바로 확인 가능하다.
-        bodyTail: tail
-      };
-    }
-
-    var topType = Object.prototype.toString.call(parsed) === "[object Array]" ? "array" : (typeof parsed === "object" ? "object" : typeof parsed);
-    var topKeys = topType === "object" ? Object.keys(parsed) : null;
-    var arr = GoombaBot.http.toArray(parsed);
-    var firstItemKeys = (arr.length > 0 && arr[0] && typeof arr[0] === "object") ? Object.keys(arr[0]) : null;
-
-    return { ok: true, stage: "done", url: url, topType: topType, topKeys: topKeys, arrayCount: arr.length, firstItemKeys: firstItemKeys };
-  }
-
-  /**
-   * jsoup을 완전히 우회하는 1순위 방법 - Java의 URLConnection/InputStream을 LiveConnect로
-   * 직접 사용한다. 실패하면 예외를 던진다(호출부에서 2순위로 넘어감).
-   */
-  function fetchViaJavaUrlConnection(url) {
-    var javaUrl = new Packages.java.net.URL(String(url));
-    var conn = javaUrl.openConnection();
-    conn.setConnectTimeout(15000);
-    conn.setReadTimeout(15000);
-    conn.setRequestProperty(
-      "User-Agent",
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-    );
-
-    var inputStream = conn.getInputStream();
-    var reader = new Packages.java.io.BufferedReader(new Packages.java.io.InputStreamReader(inputStream, "UTF-8"));
-    var sb = new Packages.java.lang.StringBuilder();
-    var line = reader.readLine();
-    var isFirst = true;
-    while (line !== null) {
-      if (!isFirst) sb.append("\n");
-      sb.append(line);
-      isFirst = false;
-      line = reader.readLine();
-    }
-    reader.close();
-    return String(sb.toString());
-  }
-
-  /**
-   * JSON이 아니라 순수 텍스트(예: GitHub의 코드 파일 원문)를 그대로 받아온다.
-   * 1순위로 Java URLConnection(jsoup 완전 우회)을 시도하고, 실패하면 2순위로
-   * Http.requestSync로 넘어간다.
-   */
-  function getRawText(url, timeoutMs) {
-    try {
-      return fetchViaJavaUrlConnection(url);
-    } catch (javaError) {
-      var requestOption = { url: String(url), method: "GET", timeout: timeoutMs || DEFAULT_TIMEOUT_MS, headers: mergeHeaders(null) };
-      var doc = Http.requestSync(requestOption);
-      try { return String(doc.body().text()); } catch (e1) {}
-      try { return String(doc.text()); } catch (e2) {}
-      return String(doc);
-    }
-  }
-
-  /**
-   * 순수 JavaScript(ES5)로 직접 구현한 base64 디코더 - loader.js와 완전히 동일한 구현.
-   * !굼바봇 업데이트(botcontrol.js)가 GitHub의 코드 파일을 받아서 디코딩할 때 쓴다.
-   */
-  function base64Decode(b64) {
-    var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
-    var str = String(b64).replace(/[^A-Za-z0-9\+\/\=]/g, "");
-    var output = [];
-    var enc1, enc2, enc3, enc4;
-    var i = 0;
-
-    while (i < str.length) {
-      enc1 = chars.indexOf(str.charAt(i++));
-      enc2 = chars.indexOf(str.charAt(i++));
-      enc3 = chars.indexOf(str.charAt(i++));
-      enc4 = chars.indexOf(str.charAt(i++));
-
-      var chr1 = (enc1 << 2) | (enc2 >> 4);
-      var chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
-      var chr3 = ((enc3 & 3) << 6) | enc4;
-
-      output.push(String.fromCharCode(chr1));
-      if (enc3 !== 64) output.push(String.fromCharCode(chr2));
-      if (enc4 !== 64) output.push(String.fromCharCode(chr3));
-    }
-
-    var byteStr = output.join("");
-    var result = "";
-    var j = 0;
-    while (j < byteStr.length) {
-      var c1 = byteStr.charCodeAt(j);
-      if (c1 < 0x80) {
-        result += String.fromCharCode(c1);
-        j++;
-      } else if (c1 >= 0xC0 && c1 < 0xE0) {
-        var c2 = byteStr.charCodeAt(j + 1);
-        result += String.fromCharCode(((c1 & 0x1F) << 6) | (c2 & 0x3F));
-        j += 2;
-      } else if (c1 >= 0xE0 && c1 < 0xF0) {
-        var c2b = byteStr.charCodeAt(j + 1);
-        var c3b = byteStr.charCodeAt(j + 2);
-        result += String.fromCharCode(((c1 & 0x0F) << 12) | ((c2b & 0x3F) << 6) | (c3b & 0x3F));
-        j += 3;
-      } else {
-        var c2c = byteStr.charCodeAt(j + 1);
-        var c3c = byteStr.charCodeAt(j + 2);
-        var c4c = byteStr.charCodeAt(j + 3);
-        var codepoint = ((c1 & 0x07) << 18) | ((c2c & 0x3F) << 12) | ((c3c & 0x3F) << 6) | (c4c & 0x3F);
-        codepoint -= 0x10000;
-        result += String.fromCharCode(0xD800 + (codepoint >> 10), 0xDC00 + (codepoint & 0x3FF));
-        j += 4;
+    out.push("\uD83D\uDCC9 룬 교체 예상");
+    for (var r = 0; r < RUNE_STEPS.length; r++) {
+      var count = RUNE_STEPS[r];
+      var delta = count * 300;
+      var newResistance = resistance + delta;
+      out.push("\uD83D\uDD04 8\u219210성 룬 " + count + "개 (+" + delta + ")");
+      for (var j = 0; j < MAIN_DISPLAY_CONTENTS.length; j++) {
+        out.push(formatContentLineWithDelta(newResistance, resistance, MAIN_DISPLAY_CONTENTS[j]));
       }
     }
-    return result;
+    out.push(SECTION_LINE);
+
+    out.push("\uD83D\uDCCC 참고");
+    out.push("• 계산식은 기존과 동일");
+    out.push("• 출력 UX만 개선");
+    out.push("• 기존 명령어는 모두 유지");
+    out.push("• !마저 목표");
+    out.push("• !마저 전체");
+    out.push("• !마저 비교");
+    out.push("• !마저 [저항] 만 출력 형식 변경");
+
+    return out.join("\n");
   }
 
-  return { getJson: getJson, getJsonFromUrl: getJsonFromUrl, getRawText: getRawText, inspect: inspect, base64Decode: base64Decode, callCounts: callCounts };
+
+  function formatContentLine(c, resistance) {
+    var pct = calcAttackFinalDamagePct(resistance, c.pressure);
+    var sign = pct >= 100 ? "+" : "";
+    var pctText = sign + (pct - 100).toFixed(1) + "%";
+    return c.label + (c.estimated ? " (예상)" : "") + " : " + pctText;
+  }
+
+  function resistanceExecute(chat) {
+    var args = chat.args;
+
+    // ⚠️ "!마저 전체 [저항]" - ErinnData 계산기의 콘텐츠별 그리드와 동일하게, 확정된
+    // 콘텐츠 압력표 전체에 대해 한 번에 계산해서 보여준다(공격 최종대미지 기준).
+    if (String(args[0]) === "전체") {
+      var resistanceAll = Number(args[1]);
+      if (isNaN(resistanceAll)) {
+        chat.reply(F.usageBlock(["!마저 전체 [내 저항]", "예) !마저 전체 4400"]));
+        return;
+      }
+      var allLines = [F.field("내 마도 저항", resistanceAll), ""];
+      for (var ai = 0; ai < CONTENT_PRESSURES.length; ai++) {
+        allLines.push(formatContentLine(CONTENT_PRESSURES[ai], resistanceAll));
+      }
+      allLines.push("", ERINNDATA_NOTE);
+      chat.reply(F.box(F.emoji.calc + " 마도 저항 - 콘텐츠별 대미지 배율", allLines));
+      return;
+    }
+
+    // ⚠️ "!마저 비교 [A] [B]" - ErinnData 계산기의 A/B 프리셋 비교 그리드와 동일한
+    // 형태. 콘텐츠 압력표 전체에 대해 A/B 두 저항값을 나란히 비교한다.
+    if (String(args[0]) === "비교") {
+      var valA = Number(args[1]);
+      var valB = Number(args[2]);
+      if (isNaN(valA) || isNaN(valB)) {
+        chat.reply(F.usageBlock(["!마저 비교 [A] [B]", "예) !마저 비교 4400 7200"]));
+        return;
+      }
+      var cmpLines = [F.field("A", valA), F.field("B", valB), ""];
+      for (var ci = 0; ci < CONTENT_PRESSURES.length; ci++) {
+        var c = CONTENT_PRESSURES[ci];
+        var pctA = calcAttackFinalDamagePct(valA, c.pressure) - 100;
+        var pctB = calcAttackFinalDamagePct(valB, c.pressure) - 100;
+        cmpLines.push(c.label + (c.estimated ? " (예상)" : ""));
+        cmpLines.push("  A " + (pctA >= 0 ? "+" : "") + pctA.toFixed(1) + "%   B " + (pctB >= 0 ? "+" : "") + pctB.toFixed(1) + "%");
+      }
+      cmpLines.push("", ERINNDATA_NOTE);
+      chat.reply(F.box(F.emoji.calc + " 마도 저항 - A/B 비교", cmpLines));
+      return;
+    }
+
+    // ⚠️ "!마저 목표 [현재] [목표저항]" - 현재/목표 두 저항값을 나란히 비교해서
+    // "필요한 수치"까지 한눈에 보여주는 모드(기존 계산 공식/기본압력은 그대로 재사용,
+    // 기존 "!마저 [저항] [압력]" 방식은 전혀 안 건드림).
+    if (String(args[0]) === "목표") {
+      var current = Number(args[1]);
+      var goal = Number(args[2]);
+      var pressureArg = Number(args[3]);
+      var pressure2 = isNaN(pressureArg) ? DEFAULT_PRESSURE : pressureArg;
+
+      if (isNaN(current) || isNaN(goal)) {
+        chat.reply(F.usageBlock(["!마저 목표 [현재 저항] [목표 저항]", "예) !마저 목표 4100 4700"]));
+        return;
+      }
+
+      var curAttack = calcAttackFinalDamagePct(current, pressure2);
+      var curHit = calcHitFinalDamagePct(current, pressure2);
+      var goalAttack = calcAttackFinalDamagePct(goal, pressure2);
+      var goalHit = calcHitFinalDamagePct(goal, pressure2);
+      var need = goal - current;
+
+      var goalLines = [
+        F.field("콘텐츠 마도 압력", pressure2 + (isNaN(pressureArg) ? " (" + DEFAULT_PRESSURE_LABEL + " 기준)" : "")),
+        "",
+        F.field("\uD83D\uDCCD 현재 마도저항", current),
+        F.field("  ⚔️ 공격 최종대미지", curAttack.toFixed(1) + "%"),
+        F.field("  \uD83D\uDEE1\uFE0F 피격 최종대미지", curHit.toFixed(1) + "%"),
+        "",
+        F.field("\uD83C\uDFAF 목표 마도저항", goal),
+        F.field("  ⚔️ 공격 최종대미지", goalAttack.toFixed(1) + "%"),
+        F.field("  \uD83D\uDEE1\uFE0F 피격 최종대미지", goalHit.toFixed(1) + "%"),
+        "",
+        F.field("\uD83D\uDCCA 필요한 수치", (need > 0 ? "저항 " + need + " 더 필요" : (need < 0 ? "이미 목표 초과(+" + (-need) + ")" : "이미 목표 도달"))),
+        "",
+        F.emoji.warn + " 공식 출처: 나무위키(커뮤니티 문서, 공식 자료 아님) - 참고용으로만 사용하세요."
+      ];
+      chat.reply(F.box(F.emoji.calc + " 마도 저항 목표 비교", goalLines));
+      return;
+    }
+
+    var resistance = Number(args[0]);
+
+    if (args.length === 0 || isNaN(resistance)) {
+      chat.reply(F.usageBlock([
+        "!마도저항 [내 저항]", "!마도저항 [내 저항] [콘텐츠 압력]", "!마도저항 목표 [현재] [목표]",
+        "!마도저항 전체 [내 저항]", "!마도저항 비교 [A] [B]",
+        "예) !마도저항 4100", "예) !마도저항 4100 4700", "예) !마도저항 목표 4100 4700",
+        "예) !마도저항 전체 4400", "예) !마도저항 비교 4400 7200"
+      ]));
+      return;
+    }
+
+    var usingDefault = args.length < 2 || isNaN(Number(args[1]));
+
+    // ⚠️ "!마저 [저항]" (압력 생략) 형태일 때만 새 쿠짱봇 스타일 출력 사용.
+    // "!마저 [저항] [압력]"으로 압력을 직접 지정한 경우는 기존 출력 방식 그대로 유지
+    // (사용자 확정: "!마저 [저항] 만 출력 형식 변경").
+    if (usingDefault) {
+      chat.reply(buildKuzzangStyleReply(resistance));
+      return;
+    }
+
+    var pressure = Number(args[1]);
+
+    var attackPct = calcAttackFinalDamagePct(resistance, pressure);
+    var hitPct = calcHitFinalDamagePct(resistance, pressure);
+
+    var lines = [
+      F.field("내 마도 저항", resistance),
+      F.field("콘텐츠 마도 압력", pressure),
+      "",
+      F.field("⚔️ 공격 최종대미지", attackPct.toFixed(1) + "%"),
+      F.field("\uD83D\uDEE1\uFE0F 피격 최종대미지", hitPct.toFixed(1) + "%")
+    ];
+
+    if (resistance < pressure) {
+      var needed = pressure - resistance;
+      lines.push("", F.emoji.target + " 압력과 같아지려면 저항 " + needed + " 더 필요");
+    }
+
+    lines.push("", F.emoji.warn + " 공식 출처: 나무위키(커뮤니티 문서, 공식 자료 아님) - 참고용으로만 사용하세요.");
+
+    chat.reply(F.box(F.emoji.calc + " 마도 저항 계산", lines));
+  }
+
+  GoombaBot.registerCommand("마도저항", {
+    category: "정보", summary: "마도 저항 계산 (압력 생략 시 룬다 지옥1 기준)", usage: ["!마도저항 4100", "!마도저항 4100 4700", "!마도저항 목표 4100 4700", "!마도저항 전체 4400", "!마도저항 비교 4400 7200"],
+    detail: {
+      title: F.emoji.calc + " 마도 저항 계산기", examples: ["!마도저항 4100", "!마도저항 4100 4700", "!마도저항 목표 4100 4700", "!마도저항 전체 4400", "!마도저항 비교 4400 7200"],
+      features: [
+        "!마도저항 [저항]만 넣으면 어비스/카브락 7개 콘텐츠 + 목표(7200/8600/10000) + 8→10성 룬 1~4개 시뮬레이션까지 한 메시지로 전부 보여줍니다",
+        "!마도저항 [저항] [압력]으로 압력을 직접 지정하면 그 콘텐츠 하나만 계산하는 기존 방식 그대로입니다",
+        "!마도저항 목표 [현재] [목표]로 현재/목표 저항을 나란히 비교하고 필요한 수치까지 확인할 수 있습니다",
+        "!마도저항 전체 [저항]으로 어비스/카브락 전체 콘텐츠(미공개 예상치 포함) 대미지 배율을 확인합니다",
+        "!마도저항 비교 [A] [B]로 두 저항값을 전체 콘텐츠에 대해 나란히 비교합니다",
+        "공격 최종대미지 공식과 콘텐츠 압력표는 ErinnData 계산기로 검증됨. 피격 최종대미지는 나무위키 출처(대조 확인 전)"
+      ]
+    },
+    execute: resistanceExecute
+  });
+
+  // !마저 - !마도저항의 단축 명령어(완전히 동일한 함수를 그대로 사용)
+  GoombaBot.registerCommand("마저", {
+    category: "정보", summary: "마도 저항 계산 (!마도저항과 완전히 동일)", usage: ["!마저 4100", "!마저 4100 4700", "!마저 목표 4100 4700", "!마저 전체 4400", "!마저 비교 4400 7200"],
+    detail: { title: F.emoji.calc + " 마도 저항 계산기", examples: ["!마저 4100", "!마저 4100 4700", "!마저 목표 4100 4700", "!마저 전체 4400", "!마저 비교 4400 7200"], features: ["!마도저항과 완전히 동일하게 동작합니다"] },
+    execute: resistanceExecute
+  });
 })();
-
-// ---- API 응답 파싱 공통 헬퍼 (commands/*.js가 공용으로 씀) ----
-GoombaBot.http.toArray = function (json, preferredKey) {
-  if (!json) return [];
-  if (Object.prototype.toString.call(json) === "[object Array]") return json;
-  if (typeof json !== "object") return [];
-
-  // 0순위: 호출부가 실제로 확인한 필드명을 명시했다면 그걸 최우선으로 쓴다
-  // (예: 룬워드 응답이 {version, seasons, words, total}인데 seasons가 배열이라 먼저
-  // 잡혀버리는 문제 - !진단으로 실제 필드명을 확인한 뒤 words를 명시적으로 지정해서 해결)
-  if (preferredKey && json[preferredKey] && Object.prototype.toString.call(json[preferredKey]) === "[object Array]") {
-    return json[preferredKey];
-  }
-
-  // 1순위: 흔히 쓰이는 후보 키 이름들
-  var candidateKeys = ["items", "data", "list", "results", "records", "rows", "content", "words"];
-  for (var i = 0; i < candidateKeys.length; i++) {
-    var v = json[candidateKeys[i]];
-    if (v && Object.prototype.toString.call(v) === "[object Array]") return v;
-  }
-  // 2순위: 후보 키에 없으면 객체 안에서 배열형 값을 자동으로 찾는다
-  // (실제 API 필드명이 예상과 다를 때도 도감/검색이 죽지 않도록)
-  for (var key in json) {
-    if (!json.hasOwnProperty(key)) continue;
-    if (Object.prototype.toString.call(json[key]) === "[object Array]") return json[key];
-  }
-  return [];
-};
-
-GoombaBot.http.extractField = function (obj, candidateKeys) {
-  for (var i = 0; i < candidateKeys.length; i++) {
-    if (obj && obj[candidateKeys[i]] !== undefined && obj[candidateKeys[i]] !== null && obj[candidateKeys[i]] !== "") return obj[candidateKeys[i]];
-  }
-  return null;
-};
-
-/** extractField와 같지만, 실제로 매칭된 키 이름도 같이 돌려준다 (중복 표시 방지용) */
-GoombaBot.http.extractFieldWithKey = function (obj, candidateKeys) {
-  for (var i = 0; i < candidateKeys.length; i++) {
-    if (obj && obj[candidateKeys[i]] !== undefined && obj[candidateKeys[i]] !== null && obj[candidateKeys[i]] !== "") {
-      return { key: candidateKeys[i], value: obj[candidateKeys[i]] };
-    }
-  }
-  return { key: null, value: null };
-};
-
-/**
- * @param cacheKey 캐시 파일 키
- * @param ttlMs 캐시 유효시간
- * @param path API 경로
- * @param preferredKey (선택) 응답의 최상위 키 중 이 이름을 최우선으로 배열로 사용
- *   (예: 룬워드 응답이 {version, seasons, words, total} 형태인데, 후보키 추측(seasons가
- *   먼저 배열로 잡힘) 대신 실제 데이터가 들어있는 "words"를 확실하게 쓰기 위함)
- * @param fetchOptions (선택) { timeout } - 응답이 무거운 API(룬 등)를 위한 타임아웃 지정
- */
-GoombaBot.http.fetchCached = function (cacheKey, ttlMs, path, preferredKey, fetchOptions) {
-  var cached = GoombaBot.storage.read(cacheKey, ttlMs);
-  if (cached) return cached;
-  try {
-    var json = GoombaBot.http.getJson(path, fetchOptions || {});
-    var arr = GoombaBot.http.toArray(json, preferredKey);
-    GoombaBot.storage.write(cacheKey, arr);
-    return arr;
-  } catch (e) {
-    GoombaBot.log("조회 실패 (" + path + "): " + e);
-    return GoombaBot.storage.readStale(cacheKey) || [];
-  }
-};
-
-/**
- * 어떤 zero-arg 조회 함수든 메모리 TTL 캐시로 감싼다. 같은 실행 세션 안에서는
- * TTL이 지나기 전까지 fn()을 다시 호출하지 않고 그 자리에서 바로 반환한다
- * (디스크 캐시보다 한 단계 더 빠름 - Database 읽기/JSON 파싱조차 생략).
- */
-GoombaBot.http.memoize = function (fn, ttlMs) {
-  var cache = null;
-  var cachedAt = 0;
-  return function () {
-    var now = Date.now();
-    if (cache !== null && (now - cachedAt) < ttlMs) return cache;
-    cache = fn();
-    cachedAt = now;
-    return cache;
-  };
-};
 
 module.exports = { GoombaBot: GoombaBot };
 

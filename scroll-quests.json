@@ -1,0 +1,206 @@
+[
+  {
+    "shop": "던바튼",
+    "skill": "대장",
+    "item": "크레센트 엣지소드",
+    "scrollCount": 3,
+    "expPerScroll": 381,
+    "materials": [
+      {
+        "name": "가죽+",
+        "qty": 4
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "던바튼",
+    "skill": "목공",
+    "item": "그랜드 크로스보우",
+    "scrollCount": 3,
+    "expPerScroll": 381,
+    "materials": [
+      {
+        "name": "목재+",
+        "qty": 4
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "던바튼",
+    "skill": "매직",
+    "item": "로터스 힐링 완드",
+    "scrollCount": 3,
+    "expPerScroll": 381,
+    "materials": [
+      {
+        "name": "목재+",
+        "qty": 4
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "반호르",
+    "skill": "대장",
+    "item": "론 엣지소드S",
+    "scrollCount": 3,
+    "expPerScroll": 426,
+    "materials": [
+      {
+        "name": "가죽+",
+        "qty": 6
+      },
+      {
+        "name": "합금강괴",
+        "qty": 6
+      }
+    ]
+  },
+  {
+    "shop": "반호르",
+    "skill": "목공",
+    "item": "라이트 크로스보우S",
+    "scrollCount": 3,
+    "expPerScroll": 426,
+    "materials": [
+      {
+        "name": "상급 목재",
+        "qty": 6
+      },
+      {
+        "name": "강철괴",
+        "qty": 6
+      }
+    ]
+  },
+  {
+    "shop": "반호르",
+    "skill": "매직",
+    "item": "마블 힐링 완드S",
+    "scrollCount": 3,
+    "expPerScroll": 426,
+    "materials": [
+      {
+        "name": "상급 목재",
+        "qty": 6
+      },
+      {
+        "name": "강철괴",
+        "qty": 6
+      }
+    ]
+  },
+  {
+    "shop": "이멘마하",
+    "skill": "중갑",
+    "item": "비늘 갑옷 신발S",
+    "scrollCount": 3,
+    "expPerScroll": 324,
+    "materials": [
+      {
+        "name": "가죽+",
+        "qty": 4
+      },
+      {
+        "name": "합금강괴",
+        "qty": 6
+      }
+    ]
+  },
+  {
+    "shop": "이멘마하",
+    "skill": "경갑",
+    "item": "가죽 갑옷 신발S",
+    "scrollCount": 3,
+    "expPerScroll": 324,
+    "materials": [
+      {
+        "name": "상급 가죽",
+        "qty": 6
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "이멘마하",
+    "skill": "천옷",
+    "item": "전투복 신발S",
+    "scrollCount": 3,
+    "expPerScroll": 324,
+    "materials": [
+      {
+        "name": "상급 옷감",
+        "qty": 6
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "콜헨",
+    "skill": "중갑",
+    "item": "사슬 갑옷 신발",
+    "scrollCount": 3,
+    "expPerScroll": 285,
+    "materials": [
+      {
+        "name": "가죽+",
+        "qty": 2
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "콜헨",
+    "skill": "경갑",
+    "item": "두꺼운 가죽 갑옷 신발",
+    "scrollCount": 3,
+    "expPerScroll": 285,
+    "materials": [
+      {
+        "name": "가죽+",
+        "qty": 4
+      },
+      {
+        "name": "강철괴",
+        "qty": 2
+      }
+    ]
+  },
+  {
+    "shop": "콜헨",
+    "skill": "천옷",
+    "item": "두꺼운 전투복 신발",
+    "scrollCount": 3,
+    "expPerScroll": 285,
+    "materials": [
+      {
+        "name": "옷감+",
+        "qty": 4
+      },
+      {
+        "name": "강철괴",
+        "qty": 2
+      }
+    ]
+  }
+]

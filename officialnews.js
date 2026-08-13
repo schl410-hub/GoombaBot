@@ -1,11 +1,26 @@
 
 /**
- * commands/homework.js
- * -----------------------
- * 검은 구멍/어비스 구멍/심층 구멍/숙제 - 조회 서비스 + 명령어를 담당한다.
- * (!검구, !어구, !심구, !숙제)
+ * commands/officialnews.js
+ * ---------------------------
+ * 마비노기 모바일 "공식" 홈페이지(mabimobi.life와는 다른, Nexon 공식 운영 사이트)의
+ * 공지/이벤트/업데이트를 주기적으로 확인해서 자동으로 카카오톡 방에 알려주는 기능.
  *
- * ⚠️ 어구/심구/숙제는 API를 못 찾으셨다고 하셔서 지어내지 않고 TODO로 남깁니다.
+ * ⚠️ RSS/공개 API 확인 결과 - 없음. 대신 공지/이벤트/업데이트 목록 페이지 자체가
+ * 서버에서 완성된 형태로 내려오는 걸 확인해서(JS 렌더링 아님), Worker가 그 페이지를
+ * 대신 가져와 글목록(id/제목/링크)만 정규식으로 뽑아 깨끗한 JSON으로 돌려준다.
+ * ⚠️ 이 파싱은 실제 raw HTML을 직접 보지 못한 채로 "링크 태그는 이렇게 생겼을
+ * 것이다"라는 가장 안전한 가정만으로 짠 것 - 배포 후 !진단으로 실제 추출 결과를
+ * 확인해서 다듬어야 할 수 있다(mabimobi.life 필드명 확인 때와 같은 방식).
+ *
+ * ⚠️ 핵심 발견 - 점검 공지는 "새 글"이 아니라 "같은 글의 제목을 나중에 수정"하는
+ * 방식으로 운영됨(예: "7/16 정기점검 안내(06:00~13:00)" → 나중에 "(완료) 7/16
+ * 정기점검 안내(06:00~13:00)"로 제목만 바뀜). 그래서 "새 글 감지"뿐 아니라 이미
+ * 알림을 보낸 글의 제목이 나중에 바뀌었는지도 계속 대조해야 점검 종료/연장을 잡을
+ * 수 있다.
+ *
+ * ⚠️ "패치노트 AI 자동요약"은 굼바봇 코드 자체가 정적 JS라 실행 중에 AI를 호출할
+ * 방법이 없어서(별도 AI API 연동 필요, 미확정) 이번엔 넣지 않았다. 대신 !패치로
+ * 최신 업데이트 글 목록(제목+링크)만 확실하게 보여준다.
  */
 
 var GoombaBot = require("../core/config.js").GoombaBot;
@@ -19,432 +34,368 @@ GoombaBot.provider = GoombaBot.provider || {};
 (function () {
   var E = GoombaBotConfig.endpoints;
 
-  // ---- 검은 구멍 설정 ----
-  function getDeepHoleConfig() {
-    var cacheKey = "deep_hole_config";
-    var cached = GoombaBot.storage.read(cacheKey, GoombaBotConfig.cacheTtlMs.default);
-    if (cached) return cached;
+  /**
+   * ⚠️ Worker가 이제 응답을 base64로 감싸서 보낸다({b64: "..."} 형태) - 실기기에서
+   * 응답이 매번 비슷한 지점에서 잘리고 콜론 같은 평범한 문자까지 사라지는 현상이
+   * 반복 확인됐는데, 이 프로젝트에서 예전에 "jsoup이 순수 텍스트를 HTML로 취급해서
+   * 오염시키는" 문제를 겪은 전례와 같은 부류로 보여서 같은 해법(base64로 감싸기)을
+   * 적용했다. base64 문자열(영문/숫자/+/=)은 HTML 파서가 오해할 여지가 없다.
+   * GoombaBot.http.base64Decode()는 loader.js와 동일한 UTF-8 안전 디코더라 그대로 재사용.
+   */
+  function decodeNewsResponse(json) {
+    if (!json || typeof json.b64 !== "string") return { items: [] };
+    var decoded = GoombaBot.http.base64Decode(json.b64);
+    return JSON.parse(decoded);
+  }
+
+  function fetchNewsList(path, cacheKey) {
+    // ⚠️ 빈 배열([])도 "캐시 있음"으로 취급되면, 예전에 파싱 실패로 0건이 캐시된
+    // 경우 10분 동안 새로 고쳐진 결과를 가리게 되는 문제가 실기기에서 확인됨
+    // (!공지 테스트가 방금 고친 뒤에도 "0건"이라고 계속 나왔음) - 빈 배열은 캐시로
+    // 인정하지 않고 매번 새로 가져오도록 수정.
+    var cached = GoombaBot.storage.read(cacheKey, GoombaBotConfig.cacheTtlMs.notice);
+    if (cached && cached.length > 0) return cached;
     try {
-      var json = GoombaBot.http.getJson(E.deepHoleConfig);
-      GoombaBot.storage.write(cacheKey, json);
-      return json;
+      var raw = GoombaBot.http.getJson(path);
+      var json = decodeNewsResponse(raw);
+      var items = (json && json.items) ? json.items : [];
+      if (items.length > 0) GoombaBot.storage.write(cacheKey, items);
+      return items;
     } catch (e) {
-      GoombaBot.log("검은 구멍 설정 조회 실패: " + e);
-      return GoombaBot.storage.readStale(cacheKey) || null;
+      GoombaBot.log("공식 홈페이지 목록 조회 실패(" + path + "): " + e);
+      return GoombaBot.storage.readStale(cacheKey) || [];
     }
   }
 
-  // ---- 어비스 구멍 / 심층 구멍 / 숙제 ----
-  // ⚠️ 사용자가 API를 못 찾았다고 명시함 - 절대 지어내지 않고 TODO로 남긴다.
-  function getAbyssHoleStatus() { return null; } // TODO: tracker API 또는 숨겨진 API 확인되면 구현
-  function getDeepDungeonStatus() { return null; } // TODO: 위와 동일 (심층 구멍)
-  function getHomeworkStatus() { return null; } // TODO: tracker API 확인되면 구현
+  // ⚠️ 모니터 전용 - 캐시를 타면 모니터 주기(5분)보다 캐시 TTL(10분)이 더 길어서
+  // 두 번에 한 번은 예전 데이터를 보게 되어 새 글/제목변경 감지가 밀리거나 뒤섞이는
+  // 문제가 있었다(mock 테스트로 실제 재현됨). 모니터는 항상 최신으로 직접 가져온다
+  // (사용자가 수동으로 치는 !공지/!이벤트/!패치는 기존처럼 캐시된 fetchNewsList 사용).
+  function fetchNewsListFresh(path, cacheKey) {
+    try {
+      var raw = GoombaBot.http.getJson(path);
+      var json = decodeNewsResponse(raw);
+      var items = (json && json.items) ? json.items : [];
+      // ⚠️ 빈 배열이면 캐시를 덮어쓰지 않는다 - 일시적으로 0건이 나온 경우
+      // 기존에 저장된 정상 캐시가 날아가지 않게 하기 위함(사용자용 !공지 등에 영향).
+      if (items.length > 0) GoombaBot.storage.write(cacheKey, items);
+      return items;
+    } catch (e) {
+      GoombaBot.log("공식 홈페이지 목록 조회 실패(모니터, " + path + "): " + e);
+      return GoombaBot.storage.readStale(cacheKey) || [];
+    }
+  }
 
-  GoombaBot.provider.getDeepHoleConfig = getDeepHoleConfig;
-  GoombaBot.provider.getAbyssHoleStatus = getAbyssHoleStatus;
-  GoombaBot.provider.getDeepDungeonStatus = getDeepDungeonStatus;
-  GoombaBot.provider.getHomeworkStatus = getHomeworkStatus;
+  function getOfficialNotices() { return fetchNewsList(E.officialNotice, "official_notice_list"); }
+  function getOfficialEvents() { return fetchNewsList(E.officialEvents, "official_events_list"); }
+  function getOfficialUpdates() { return fetchNewsList(E.officialUpdate, "official_update_list"); }
+
+  function getOfficialNoticesFresh() { return fetchNewsListFresh(E.officialNotice, "official_notice_list"); }
+  function getOfficialEventsFresh() { return fetchNewsListFresh(E.officialEvents, "official_events_list"); }
+  function getOfficialUpdatesFresh() { return fetchNewsListFresh(E.officialUpdate, "official_update_list"); }
+
+  GoombaBot.provider.getOfficialNotices = getOfficialNotices;
+  GoombaBot.provider.getOfficialEvents = getOfficialEvents;
+  GoombaBot.provider.getOfficialUpdates = getOfficialUpdates;
+  GoombaBot.provider.getOfficialNoticesFresh = getOfficialNoticesFresh;
+  GoombaBot.provider.getOfficialEventsFresh = getOfficialEventsFresh;
+  GoombaBot.provider.getOfficialUpdatesFresh = getOfficialUpdatesFresh;
 })();
 
 (function () {
   var F = GoombaBot.format;
   var P = GoombaBot.provider;
-  var extractField = GoombaBot.http.extractField;
 
+  // ---- 제목 텍스트만으로 분류(별도 태그 필드에 의존하지 않음 - 요청: 오탐 최소화를
+  // 위해 내용 분석 필요, 지금은 제목에 이미 종류/시간이 다 들어있어서 이걸로 충분함) ----
+  function isMaintenanceTitle(title) { return /정기\s*점검|임시\s*점검|긴급\s*점검|점검\s*안내/.test(title); }
+  function isEmergencyTitle(title) { return /긴급\s*점검|임시\s*점검/.test(title); }
+  function isDoneTitle(title) { return /^\s*(\(완료\)|완료\s)/.test(title); }
+  function extractTimeRange(title) {
+    var m = title.match(/(\d{1,2}):(\d{2})\s*~\s*(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    return m[1] + ":" + m[2] + " ~ " + m[3] + ":" + m[4];
+  }
+  /** 연장 감지는 전체 시간대 문자열이 아니라 "종료 시각"만 비교한다(요청 반영) -
+   * 시작시각은 그대로고 종료시각만 늘어나는 게 "연장"의 정확한 의미이기 때문. */
+  function extractEndTime(title) {
+    var m = title.match(/(\d{1,2}):(\d{2})\s*~\s*(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    return m[3] + ":" + m[4];
+  }
+  /** 공지 하나의 상태를 "일반"/"점검시작"/"점검종료" 중 하나로 판정한다(요청 반영 -
+   * id+제목뿐 아니라 상태값 자체를 저장해서 비교에 쓴다). */
+  function computeStatus(title) {
+    if (!isMaintenanceTitle(title)) return "일반";
+    return isDoneTitle(title) ? "점검종료" : "점검시작";
+  }
 
-  // ---- !검구 (검은 구멍) ----
-  // ⚠️ 추측 필드명(recommendedAreas 등)이 실제와 다르면 전부 "정보 없음"으로 보이던 문제가
-  // 있었음 - 추측 대신 응답에 실제로 들어있는 필드를 F.renderDetail로 전부 자동 나열한다.
-  // (필드명이 완전히 다르게 와도 정상 표시됨 - !진단 9번(검은구멍)으로 실제 필드명 확인 가능)
-  GoombaBot.registerCommand("검구", {
-    category: "던전", summary: "검은 구멍 추천/추적 지역", usage: ["!검구"],
-    detail: { title: "\uD83D\uDD73 검은 구멍", examples: ["!검구"], features: ["응답에 실제로 들어있는 필드를 전부 자동으로 보여줍니다(필드명이 달라도 안전)"] },
+  // ---- 방별 설정 저장 (기본값: 전부 꺼짐 - 기존 방에 갑자기 스팸처럼 안 오도록) ----
+  var SETTINGS_KEY = "official_news_room_settings";
+  function getAllRoomSettings() { return GoombaBot.storage.readStale(SETTINGS_KEY) || {}; }
+  function getRoomSetting(room, key) {
+    var all = getAllRoomSettings();
+    return !!(all[room] && all[room][key]);
+  }
+  function setRoomSetting(room, key, value) {
+    var all = getAllRoomSettings();
+    if (!all[room]) all[room] = { 공지: false, 점검: false, 이벤트: false };
+    all[room][key] = value;
+    GoombaBot.storage.write(SETTINGS_KEY, all);
+  }
+  function roomsWanting(key) {
+    var all = getAllRoomSettings();
+    var rooms = [];
+    for (var room in all) { if (all.hasOwnProperty(room) && all[room][key]) rooms.push(room); }
+    return rooms;
+  }
+
+  GoombaBot.officialNews = {
+    isMaintenanceTitle: isMaintenanceTitle, isEmergencyTitle: isEmergencyTitle,
+    isDoneTitle: isDoneTitle, extractTimeRange: extractTimeRange, extractEndTime: extractEndTime,
+    computeStatus: computeStatus,
+    getRoomSetting: getRoomSetting, setRoomSetting: setRoomSetting, roomsWanting: roomsWanting
+  };
+
+  // ---- 토글은 기존 "!공지"/"!점검" 명령어의 서브커맨드로 추가한다(!이벤트는 신규라
+  // 별도 명령어로 만든다) - 절대 같은 이름으로 새 명령어를 등록하지 않는다(기존 기능이
+  // 덮어써져서 사라지는 걸 방지). commands/maintenance.js에서 이 함수들을 불러서 쓴다.
+  GoombaBot.officialNews.handleToggleSub = function (chat, key, label) {
+    var sub = String(chat.args[0] || "");
+    if (sub === "켜기") { setRoomSetting(chat.room.name, key, true); chat.reply(F.emoji.ok + " 이 방에서 공식 " + label + " 자동알림을 켰습니다."); return true; }
+    if (sub === "끄기") { setRoomSetting(chat.room.name, key, false); chat.reply(F.emoji.ok + " 이 방에서 공식 " + label + " 자동알림을 껐습니다."); return true; }
+    return false; // 켜기/끄기가 아니면 처리 안 함 - 호출부(기존 명령어)가 원래 하던 동작을 마저 하면 됨
+  };
+
+  // ---- "!공지 테스트" / "!점검 테스트" - 실제 공지가 올라올 때까지 안 기다리고
+  // 실제 발송 형식 그대로 미리 볼 수 있게 하는 미리보기(요청 반영). **실제 API에서
+  // 가져온 최신 데이터를 그대로 사용한다**(예전엔 하드코딩된 문구였는데, 실제 데이터로
+  // 확인하고 싶다는 요청을 받아서 수정함) - seenMap/저장된 상태는 안 건드리고, 그
+  // 자리에서 chat.reply로만 보여준다(실제 방 브로드캐스트 아님).
+  GoombaBot.officialNews.handleTestSub = function (chat, key) {
+    if (String(chat.args[0]) !== "테스트") return false;
+
+    var notices = GoombaBot.provider.getOfficialNotices();
+    if (notices.length === 0) {
+      chat.reply(F.emoji.warn + " 지금 공식 공지 데이터를 하나도 못 가져왔습니다(파싱 실패 또는 0건). !진단 11로 원인을 확인해주세요.");
+      return true;
+    }
+
+    if (key === "공지") {
+      var latest = notices[0];
+      chat.reply([
+        "\uD83D\uDEA8 새 공지사항 발견! (테스트 미리보기)", "",
+        "\uD83D\uDCDD " + latest.title, "",
+        "\uD83D\uDD17 " + latest.url
+      ].join("\n"));
+      return true;
+    }
+    if (key === "점검") {
+      var maint = null;
+      for (var i = 0; i < notices.length; i++) { if (isMaintenanceTitle(notices[i].title)) { maint = notices[i]; break; } }
+      if (!maint) { chat.reply(F.emoji.warn + " 지금 목록에 점검 관련 공지가 없어서 테스트 미리보기를 만들 수 없습니다."); return true; }
+      var range = extractTimeRange(maint.title);
+      var lines = [
+        (isEmergencyTitle(maint.title) ? "\uD83D\uDEA8 긴급 점검" : "\uD83D\uDEA8 서버 점검 시작") + " (테스트 미리보기)",
+        "", maint.title
+      ];
+      if (range) lines.push("", "\uD83D\uDD52 시간", range);
+      lines.push("", maint.url);
+      chat.reply(lines.join("\n"));
+      return true;
+    }
+    return false;
+  };
+
+  // ---- !이벤트 (신규 명령어) ----
+  GoombaBot.registerCommand("이벤트", {
+    category: "공지", summary: "공식 홈페이지 최근 이벤트 목록 / 자동알림 켜기·끄기", usage: ["!이벤트", "!이벤트 켜기", "!이벤트 끄기"],
+    detail: {
+      title: "\uD83C\uDF89 이벤트", examples: ["!이벤트", "!이벤트 켜기"],
+      features: ["최근 이벤트 5개를 보여줍니다", "!이벤트 켜기/끄기로 이 방에서 새 이벤트 자동알림을 받을지 정할 수 있습니다"]
+    },
     execute: function (chat) {
-      var config = P.getDeepHoleConfig();
-      if (!config) { chat.reply(F.emoji.warn + " 검은 구멍 정보를 가져오지 못했습니다. 운영진에게 !진단 9로 확인을 요청해주세요."); return; }
+      if (GoombaBot.officialNews.handleToggleSub(chat, "이벤트", "이벤트")) return;
 
-      var isArray = Object.prototype.toString.call(config) === "[object Array]";
-      var out = [];
-      if (isArray) {
-        for (var i = 0; i < config.length; i++) {
-          var entry = config[i];
-          var entryName = extractField(entry, ["name", "area", "areaName", "title"]);
-          var entryLines = F.renderDetailAll(entry, {});
-          out.push((entryName ? "▸ " + entryName : "▸ " + (i + 1) + "번째 지역") + (entryLines.length ? "\n" + entryLines.join("\n") : ""));
-        }
-      } else {
-        out = F.renderDetailAll(config, {});
-      }
-      if (out.length === 0) { chat.reply(F.emoji.warn + " 검은 구멍 응답에서 표시할 필드를 찾지 못했습니다. !진단 9로 실제 구조를 확인해주세요."); return; }
-      chat.reply(F.box("\uD83D\uDD73 검은 구멍", out));
+      var items = P.getOfficialEvents();
+      if (items.length === 0) { chat.reply(F.emoji.warn + " 이벤트 목록을 가져오지 못했습니다."); return; }
+      var lines = [];
+      for (var i = 0; i < Math.min(items.length, 5); i++) lines.push("▸ " + items[i].title);
+      chat.reply(F.box("\uD83C\uDF89 최근 이벤트", lines));
     }
   });
 
-  // ---- 어비스 구멍(!어구) - API 없이 "기준시각 + 36시간15분 간격"으로 계산 ----
-  // ⚠️ 심층 구멍/숙제는 여전히 API 미확인이라 TODO로 남긴다(어구만 계산식으로 구현).
-  var ABYSS_INTERVAL_MS = 36 * 3600 * 1000 + 15 * 60 * 1000; // 36시간 15분
+  // ---- !패치 (신규 명령어 - 최신 업데이트/패치노트 목록) ----
+  GoombaBot.registerCommand("패치", {
+    category: "공지", summary: "공식 홈페이지 최근 업데이트(패치노트) 목록", usage: ["!패치"],
+    detail: {
+      title: "\uD83D\uDCD6 패치노트", examples: ["!패치"],
+      features: ["최근 업데이트(패치노트) 5개의 제목과 링크를 보여줍니다", "본문 자동 요약은 상세페이지 구조 확인 후 다음 업데이트에서 추가 예정입니다"]
+    },
+    execute: function (chat) {
+      var items = P.getOfficialUpdates();
+      if (items.length === 0) { chat.reply(F.emoji.warn + " 업데이트 목록을 가져오지 못했습니다."); return; }
+      var lines = [];
+      for (var i = 0; i < Math.min(items.length, 5); i++) {
+        lines.push(items[i].title);
+        lines.push(items[i].url);
+        if (i < Math.min(items.length, 5) - 1) lines.push("");
+      }
+      chat.reply(F.box("\uD83D\uDCD6 최근 업데이트", lines));
+    }
+  });
+})();
 
-  function pad2(n) { return (n < 10 ? "0" : "") + n; }
-  function formatDateTime(ms) {
-    var d = new Date(ms);
-    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+// ---- MONITOR: 5분마다 공지/점검/이벤트/업데이트 새 글·제목변경 감지 ----
+(function () {
+  var F = GoombaBot.format;
+  var P = GoombaBot.provider;
+  var N = GoombaBot.officialNews;
+
+  var SEEN_KEY = "official_notice_seen"; // { id: { title, isDone } } - 최대 MAX_SEEN개까지만 보관
+  var MAX_SEEN = 150;
+
+  function getSeenMap() { return GoombaBot.storage.readStale(SEEN_KEY) || {}; }
+  function saveSeenMap(map) {
+    // 너무 오래된 항목까지 무한정 쌓이지 않도록, id가 큰(최신) 순으로 MAX_SEEN개만 남긴다
+    var ids = [];
+    for (var id in map) { if (map.hasOwnProperty(id)) ids.push(id); }
+    if (ids.length > MAX_SEEN) {
+      ids.sort(function (a, b) { return Number(b) - Number(a); });
+      var trimmed = {};
+      for (var i = 0; i < MAX_SEEN; i++) trimmed[ids[i]] = map[ids[i]];
+      map = trimmed;
+    }
+    GoombaBot.storage.write(SEEN_KEY, map);
   }
-  function formatTimeOnly(ms) {
-    var d = new Date(ms);
-    return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
-  }
-  function formatRemaining(ms) {
-    if (ms < 0) ms = 0;
-    var totalMin = Math.floor(ms / 60000);
-    var h = Math.floor(totalMin / 60);
-    var m = totalMin % 60;
-    return h + "시간 " + m + "분";
-  }
-  function getAbyssBaseTime() { return GoombaBot.storage.readStale("abyss_base_time"); }
-  function computeNextAbyssOccurrence(baseTime, now) {
-    if (now <= baseTime) return baseTime;
-    var n = Math.ceil((now - baseTime) / ABYSS_INTERVAL_MS);
-    return baseTime + n * ABYSS_INTERVAL_MS;
+
+  function broadcast(rooms, message) {
+    for (var i = 0; i < rooms.length; i++) {
+      try { GoombaBot.bot.send(rooms[i], message); } catch (e) { GoombaBot.log("공식 소식 알림 전송 실패(" + rooms[i] + "): " + e); }
+    }
   }
 
   /**
-   * ⚠️ 알림 단계 정의 - 시간이 큰 순서대로. 각 단계의 ms는 "이 시간 이하로 남으면
-   * 이 단계"라는 뜻(예: 30분=1800000ms 이하 남았을 때). 순서대로 하나씩만 보낸다.
-   * 예전 코드는 "정확히 29~30분 남았을 때"처럼 폭이 좁은 시간창으로 체크해서,
-   * 타이밍이 살짝만 어긋나도 알림을 통째로 놓칠 위험이 있었다 - 이번에는
-   * "이 시간 이하로 남았고 + 아직 이 단계를 안 보냈으면" 방식으로 바꿔서 그런
-   * 위험을 없앴다(모니터가 늦게 돌아도 다음 체크 때 확실히 잡힘).
+   * 공지 목록 처리 - 새 글/점검 시작·긴급점검/점검 종료/점검 연장을 전부 여기서 판단한다.
+   * ⚠️ 요청 반영 - 각 글마다 {제목, 상태(일반/점검시작/점검종료), 종료시각, 마지막확인시각}을
+   * 전부 저장해서 비교한다(이전엔 제목+완료여부만 저장했음). 이 저장 자체가 Database에
+   * 영구 보관되므로, Worker나 봇이 재시작돼도 "이미 알린 상태"는 그대로 남아있어 같은
+   * 알림이 중복 발송되지 않는다(요청 2번 - 중복 알림 방지).
    */
-  var ABYSS_STAGES = [
-    { key: "30min", ms: 30 * 60000, message: function (next) { return "\uD83E\uDE9D 어구까지 30분 남았습니다!\n\uD83D\uDD52 예정 시간 : " + formatTimeOnly(next); } },
-    { key: "15min", ms: 15 * 60000, message: function (next) { return "\uD83E\uDE9D 어구까지 15분 남았습니다!\n\uD83D\uDD52 예정 시간 : " + formatTimeOnly(next); } },
-    { key: "5min", ms: 5 * 60000, message: function (next) { return "\uD83E\uDE9D 어구까지 5분 남았습니다!\n\uD83D\uDD52 예정 시간 : " + formatTimeOnly(next); } },
-    { key: "start", ms: 0, message: function () { return "\uD83C\uDFA3 어구 시간입니다!"; } }
-  ];
+  function processNoticeList(items, seenMap, nowTs) {
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      var prev = seenMap[item.id];
+      var status = N.computeStatus(item.title);
+      var endTime = N.extractEndTime(item.title);
 
-  /** 지금 이 순간(now) 기준으로, next 발생시각까지 이미 지나버린 단계들은 "보낸 것"으로
-   * 선반영해서 나중에 뒤늦게 쏟아지지 않게 한다(예: 8분 전에 등록하면 30/15분 단계는
-   * 조용히 건너뛰고 5분/시작만 남긴다). */
-  function buildAlreadyPassedStages(next, now) {
-    var msUntil = next - now;
-    var passed = [];
-    for (var i = 0; i < ABYSS_STAGES.length; i++) {
-      if (msUntil <= ABYSS_STAGES[i].ms) passed.push(ABYSS_STAGES[i].key);
+      if (!prev) {
+        // 신규 글
+        if (status === "점검시작") {
+          var timeRange = N.extractTimeRange(item.title);
+          var isEmergency = N.isEmergencyTitle(item.title);
+          var lines = [
+            isEmergency ? "\uD83D\uDEA8 긴급 점검" : "\uD83D\uDEA8 서버 점검 시작",
+            "",
+            item.title
+          ];
+          if (timeRange) lines.push("", "\uD83D\uDD52 시간", timeRange);
+          lines.push("", item.url);
+          broadcast(N.roomsWanting("점검"), lines.join("\n"));
+        } else if (status === "일반") {
+          broadcast(N.roomsWanting("공지"), [
+            "\uD83D\uDEA8 새 공지사항 발견!", "",
+            "\uD83D\uDCDD " + item.title, "",
+            "\uD83D\uDD17 " + item.url
+          ].join("\n"));
+        }
+        // status === "점검종료"인 글이 "신규"로 잡히는 경우(예: 봇 다운 중에 시작→종료가
+        // 한번에 지나간 경우)는 이미 지나간 점검이라 알림 없이 조용히 기록만 한다.
+        seenMap[item.id] = { title: item.title, status: status, endTime: endTime, lastCheckedAt: nowTs };
+        continue;
+      }
+
+      // 이미 본 글 - 제목이 그대로면 마지막 확인시각만 갱신하고 넘어간다(알림 없음)
+      if (prev.title === item.title) { prev.lastCheckedAt = nowTs; continue; }
+
+      // 제목이 바뀜 - 상태가 바뀐 경우와 종료시각만 바뀐 경우(연장)를 구분해서 딱 1번만 알린다
+      if (prev.status !== "점검종료" && status === "점검종료") {
+        broadcast(N.roomsWanting("점검"), [
+          "\u2705 서버 점검 종료", "", "서버 접속 가능합니다.", "", "즐마하세요 \uD83C\uDF44"
+        ].join("\n"));
+      } else if (prev.endTime && endTime && prev.endTime !== endTime) {
+        broadcast(N.roomsWanting("점검"), [
+          "\u23F0 점검 연장", "", "기존", prev.endTime, "", "변경", endTime
+        ].join("\n"));
+      }
+      // 그 외의 사소한 제목 수정(오타 정정 등)은 알림 스팸을 막기 위해 조용히 넘어간다
+      seenMap[item.id] = { title: item.title, status: status, endTime: endTime, lastCheckedAt: nowTs };
     }
-    return passed;
   }
 
-  GoombaBot.registerMonitor("어구감시모니터", {
-    intervalMs: 30000, // 30초마다 체크(1분 단위 시간창을 없앴으니 더 자주 봐도 안전)
-    check: function () {
-      if (GoombaBot.storage.readStale("abyss_monitor_enabled") !== true) return null;
-      var baseTime = getAbyssBaseTime();
-      if (!baseTime) return null;
-
-      var now = Date.now();
-      var record = GoombaBot.storage.readStale("abyss_alerted_stages");
-
-      // ⚠️ 핵심 - "지금 이 순간 기준으로 다음 회차"를 매번 새로 계산하면, 정확한
-      // 발생시각을 살짝이라도 지나는 순간 computeNextAbyssOccurrence가 36시간 15분
-      // 뒤의 "그 다음 회차"로 넘어가버려서 "시작 시각" 알림을 사실상 절대 못 잡는다
-      // (체크 주기가 그 찰나의 순간과 정확히 겹칠 확률이 거의 없기 때문). 그래서
-      // "지금 추적 중인 회차"를 그대로 유지하다가, 그 회차의 4단계를 전부 보낸
-      // 뒤에만 다음 회차로 넘어가도록 바꿨다.
-      var target;
-      if (!record || !record.forOccurrence) {
-        target = computeNextAbyssOccurrence(baseTime, now);
-        record = { forOccurrence: target, sentStages: [] };
-      } else {
-        target = record.forOccurrence;
-        if (record.sentStages.length >= ABYSS_STAGES.length) {
-          target = target + ABYSS_INTERVAL_MS;
-          while (target < now - ABYSS_INTERVAL_MS) target += ABYSS_INTERVAL_MS; // 봇이 오래 꺼져있었을 때 대비 안전장치
-          record = { forOccurrence: target, sentStages: buildAlreadyPassedStages(target, now) };
-        }
-      }
-
-      var msUntil = target - now;
-      for (var i = 0; i < ABYSS_STAGES.length; i++) {
-        var stage = ABYSS_STAGES[i];
-        if (msUntil <= stage.ms && record.sentStages.indexOf(stage.key) === -1) {
-          record.sentStages.push(stage.key);
-          GoombaBot.storage.write("abyss_alerted_stages", record);
-          return stage.message(target);
-        }
-      }
-      GoombaBot.storage.write("abyss_alerted_stages", record); // target/sentStages가 방금 갱신됐을 수 있으니 저장
-      return null;
-    },
-    rooms: function () { return GoombaBotConfig.alertRooms || []; }
-  });
-
-  /** "30분뒤"/"30분전"/"30분" 어디에 있든 숫자만 뽑아낸다. 못 찾으면 null. */
-  function parseMinutesArg(text) {
-    var m = String(text).match(/(\d+)\s*분/);
-    if (!m) return null;
-    var n = parseInt(m[1], 10);
-    return isNaN(n) ? null : n;
+  /** 이벤트/업데이트는 새 글만 있으면 그대로 알린다(제목 수정 추적 불필요) */
+  function processSimpleList(items, seenMap, roomSettingKey, headerLine) {
+    var nowTs = Date.now();
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      if (seenMap[item.id]) { seenMap[item.id].lastCheckedAt = nowTs; continue; }
+      broadcast(N.roomsWanting(roomSettingKey), [headerLine, "", item.title, "", item.url].join("\n"));
+      seenMap[item.id] = { title: item.title, lastCheckedAt: nowTs };
+    }
   }
 
-  GoombaBot.registerCommand("어구", {
-    category: "던전", summary: "다음 어비스 구멍 시간/남은시간/이후 일정, 개인 알림 등록", usage: ["!어구", "!어구 알림 30분뒤"],
-    detail: {
-      title: "\uD83D\uDD73 어비스 구멍", examples: ["!어구", "!어구 알림 30분뒤"],
-      features: [
-        "기준 시각 + 36시간 15분 간격으로 계산합니다(실시간 API 아님)",
-        "!어구 알림 [N]분뒤(또는 분전)로 다음 생성 N분 전에 이 방으로 알림을 한 번 받을 수 있습니다(누구나 사용 가능)",
-        "관리자는 !어구기준으로 기준시각을 조정하고 !어구감시로 방 전체 자동알림을 켤 수 있습니다"
-      ]
-    },
-    execute: function (chat) {
-      // ⚠️ "!어구 알림 30분뒤" - 개인이 원하는 리드타임으로 일회성 알림을 등록한다.
-      // 기존 "!어구감시"(관리자 전용, 방 전체, 30/15/5분+시작 고정 4단계)와는 별개의
-      // 기능 - 이건 누구나 쓸 수 있고, 원하는 분 단위를 직접 지정할 수 있다.
-      if (String(chat.args[0]) === "알림") {
-        var minutes = parseMinutesArg(chat.args.slice(1).join(" "));
-        if (minutes === null || minutes <= 0) {
-          chat.reply(F.usageBlock(["!어구 알림 30분뒤", "!어구 알림 10분전"]));
-          return;
-        }
-
-        var baseTimeForAlert = getAbyssBaseTime();
-        if (!baseTimeForAlert) {
-          chat.reply(F.emoji.warn + " 아직 기준 시각이 설정되지 않았습니다.\n운영진에게 !어구기준 설정을 요청해주세요.");
-          return;
-        }
-
-        var nowForAlert = Date.now();
-        var nextForAlert = computeNextAbyssOccurrence(baseTimeForAlert, nowForAlert);
-        var alertAt = nextForAlert - minutes * 60000;
-
-        if (alertAt <= nowForAlert) {
-          chat.reply(F.emoji.warn + " 이미 그 시점이 지났습니다. 다음 생성까지 " + formatRemaining(nextForAlert - nowForAlert) + " 남았습니다.");
-          return;
-        }
-
-        var pendingAlerts = GoombaBot.storage.readStale("abyss_custom_alerts") || [];
-        pendingAlerts.push({
-          room: chat.room.name,
-          minutesBefore: minutes,
-          forOccurrence: nextForAlert,
-          alertAt: alertAt
-        });
-        GoombaBot.storage.write("abyss_custom_alerts", pendingAlerts);
-
-        chat.reply(F.box("\uD83D\uDD14 알림 등록 완료", [
-          F.field("기준", "생성 " + minutes + "분 전"),
-          F.field("다음 생성", formatDateTime(nextForAlert)),
-          F.field("알림 예정", formatDateTime(alertAt))
-        ]));
-        return;
-      }
-
-      var baseTime = getAbyssBaseTime();
-      if (!baseTime) {
-        chat.reply(F.emoji.warn + " 아직 기준 시각이 설정되지 않았습니다.\n운영진에게 !어구기준 설정을 요청해주세요.\n(예: !어구기준 2026-07-25 20:00)");
-        return;
-      }
-
-      var now = Date.now();
-      var next = computeNextAbyssOccurrence(baseTime, now);
-
-      var lines = [
-        F.field("다음 생성", formatDateTime(next)),
-        F.field("남은 시간", formatRemaining(next - now)),
-        "",
-        "\uD83D\uDCC5 이후 일정"
-      ];
-      for (var i = 0; i < 5; i++) lines.push("• " + formatDateTime(next + i * ABYSS_INTERVAL_MS));
-
-      chat.reply(F.box("\uD83D\uDD73 어비스 구멍", lines));
-    }
-  });
-
-  // ⚠️ "!어구 알림"으로 등록된 개인 알림 - 각자 다른 방/다른 리드타임일 수 있어서
-  // 기존 모니터 방식(메시지 하나를 rooms() 목록에 그대로 뿌리는 방식)으로는 표현이
-  // 안 된다. 그래서 이 모니터는 return으로 메시지를 넘기는 대신, 알림마다 직접
-  // GoombaBot.bot.send(그 방, 메시지)를 호출한다.
-  GoombaBot.registerMonitor("어구커스텀알림모니터", {
-    intervalMs: 30000,
+  GoombaBot.registerMonitor("공식공지모니터", {
+    intervalMs: 5 * 60 * 1000, // 요청하신 "5분" 주기
     check: function () {
-      var pending = GoombaBot.storage.readStale("abyss_custom_alerts") || [];
-      if (!pending.length) return null;
+      var nowTs = Date.now();
+      var seenNotice = getSeenMap();
+      // ⚠️ "seenNotice가 비어있으면 첫 실행"으로 판단했었는데, 공지 목록 조회가 우연히
+      // 0건이거나 일시적으로 실패해도 seenNotice가 계속 비어서 매번 "첫 실행"으로
+      // 오판되어 알림이 영원히 안 나가는 버그가 있었음(mock으로 재현됨) - 별도의
+      // 명시적 초기화 플래그로 딱 한 번만 판단하도록 수정.
+      var isFirstRun = GoombaBot.storage.readStale("official_news_initialized") !== true;
 
-      var now = Date.now();
-      var remaining = [];
-      for (var i = 0; i < pending.length; i++) {
-        var p = pending[i];
-        if (now >= p.alertAt) {
-          try {
-            GoombaBot.bot.send(p.room, "\uD83E\uDE9D 어구 알림!\n요청하신 대로 다음 생성 " + p.minutesBefore + "분 전입니다.\n\uD83D\uDD52 예정 시간 : " + formatTimeOnly(p.forOccurrence));
-          } catch (sendError) {
-            GoombaBot.log("어구 커스텀 알림 전송 실패: " + sendError);
-          }
-        } else if (now < p.forOccurrence) {
-          remaining.push(p); // 아직 시점이 안 된 것만 유지
+      var notices = P.getOfficialNoticesFresh();
+      var events = P.getOfficialEventsFresh();
+      var updates = P.getOfficialUpdatesFresh();
+
+      if (isFirstRun) {
+        // ⚠️ 봇을 처음 켠 순간 과거 글 전체를 "신규"로 착각해서 방마다 수십 개씩
+        // 몰아서 보내면 안 되니, 첫 실행에서는 "본 것"으로만 기록하고 알림은 안 보낸다.
+        for (var i = 0; i < notices.length; i++) {
+          seenNotice[notices[i].id] = {
+            title: notices[i].title, status: N.computeStatus(notices[i].title),
+            endTime: N.extractEndTime(notices[i].title), lastCheckedAt: nowTs
+          };
         }
-        // 이미 발송했거나(now>=alertAt) 회차 자체가 지나버린 건 자동으로 정리(remaining에서 빠짐)
+        saveSeenMap(seenNotice);
+
+        var seenEvents = {};
+        for (var e = 0; e < events.length; e++) seenEvents[events[e].id] = { title: events[e].title, lastCheckedAt: nowTs };
+        GoombaBot.storage.write("official_events_seen", seenEvents);
+
+        var seenUpdates = {};
+        for (var u = 0; u < updates.length; u++) seenUpdates[updates[u].id] = { title: updates[u].title, lastCheckedAt: nowTs };
+        GoombaBot.storage.write("official_updates_seen", seenUpdates);
+        GoombaBot.storage.write("official_news_initialized", true);
+        return null;
       }
-      GoombaBot.storage.write("abyss_custom_alerts", remaining);
-      return null; // 직접 send했으니 반환 메시지 없음
+
+      processNoticeList(notices, seenNotice, nowTs);
+      saveSeenMap(seenNotice);
+
+      var seenEvents2 = GoombaBot.storage.readStale("official_events_seen") || {};
+      processSimpleList(events, seenEvents2, "이벤트", "\uD83C\uDF89 마비노기 공식 이벤트");
+      GoombaBot.storage.write("official_events_seen", seenEvents2);
+
+      var seenUpdates2 = GoombaBot.storage.readStale("official_updates_seen") || {};
+      processSimpleList(updates, seenUpdates2, "공지", "\uD83D\uDCD6 마비노기 공식 업데이트");
+      GoombaBot.storage.write("official_updates_seen", seenUpdates2);
+
+      return null; // 이 모니터는 broadcast()로 직접 send하므로 반환 메시지 없음
     },
     rooms: function () { return []; }
   });
-
-  /** 기준시각을 반영한다 - !어구기준과 대화형 입력 둘 다 재사용. 등록 시점에 이미
-   * 지나버린 알림 단계는 조용히 건너뛰도록(뒤늦게 몰아서 오지 않도록) 미리 "보낸 것"으로
-   * 기록해둔다(예: 8분 전에 등록하면 30분/15분 단계는 건너뛰고 5분/시작만 남음). */
-  function applyAbyssBaseTime(ms) {
-    GoombaBot.storage.write("abyss_base_time", ms);
-    var now = Date.now();
-    var next = computeNextAbyssOccurrence(ms, now);
-    GoombaBot.storage.write("abyss_alerted_stages", { forOccurrence: next, sentStages: buildAlreadyPassedStages(next, now) });
-  }
-
-  /** "yyyy-mm-dd hh:mm" 형태를 파싱한다(공백 하나로 구분된 하나의 문자열). 실패하면 null. */
-  /**
-   * 붙여넣은 텍스트(쿠짱봇/모비라이프 복사 내용 등) 어디에 있든, 맨 처음 나오는
-   * 날짜/시간을 찾아 기준시각으로 쓴다. 두 형태를 지원:
-   *   1) "yyyy-mm-dd hh:mm" (기존 그대로, 연/월/일/시/분 전부 명시)
-   *   2) "N일 H시 M분" (연/월 없음 - 지금 기준으로 가장 가까운 미래로 추정.
-   *      이미 지난 날짜면 다음 달로 넘긴다)
-   * 어느 쪽도 못 찾으면 null.
-   */
-  function parseAbyssDateTime(text) {
-    var s = String(text);
-
-    var full = s.match(/(\d{4})-(\d{2})-(\d{2})[^\d]+(\d{1,2}):(\d{2})/);
-    if (full) {
-      var d1 = new Date(Number(full[1]), Number(full[2]) - 1, Number(full[3]), Number(full[4]), Number(full[5]), 0, 0);
-      if (!isNaN(d1.getTime())) return d1.getTime();
-    }
-
-    var short = s.match(/(\d{1,2})\s*일\s*(\d{1,2})\s*시\s*(\d{1,2})\s*분/);
-    if (short) {
-      var day = Number(short[1]), hour = Number(short[2]), minute = Number(short[3]);
-      var now = new Date();
-      var candidate = new Date(now.getFullYear(), now.getMonth(), day, hour, minute, 0, 0);
-      // 계산한 날짜가 이미 24시간 넘게 지난 과거면, 이번 달이 아니라 다음 달 얘기라고 보고 넘긴다.
-      if (candidate.getTime() < now.getTime() - 24 * 3600 * 1000) {
-        candidate = new Date(now.getFullYear(), now.getMonth() + 1, day, hour, minute, 0, 0);
-      }
-      if (!isNaN(candidate.getTime())) return candidate.getTime();
-    }
-
-    return null;
-  }
-
-  GoombaBot.registerCommand("어구기준", {
-    category: "던전", adminOnly: true, summary: "어비스 구멍 기준 시각 설정(점검 등으로 시간 변경 시)", usage: ["!어구기준 2026-07-25 20:00"],
-    detail: { title: "\uD83D\uDD73 어구 기준시각 설정", examples: ["!어구기준 2026-07-25 20:00"], features: ["이 시각을 기준으로 이후 모든 일정이 36시간 15분 간격으로 다시 계산됩니다"] },
-    execute: function (chat) {
-      var dateStr = String(chat.args[0] || "");
-      var timeStr = String(chat.args[1] || "");
-      var ms = parseAbyssDateTime(dateStr + " " + timeStr);
-
-      if (ms === null) {
-        chat.reply(F.usageBlock(["!어구기준 2026-07-25 20:00"]));
-        return;
-      }
-
-      applyAbyssBaseTime(ms);
-      chat.reply(F.emoji.ok + " 어구 기준 시각을 " + formatDateTime(ms) + "(으)로 설정했습니다. 이후 일정이 이 시각 기준으로 다시 계산됩니다.");
-    }
-  });
-
-  var ABYSS_AWAIT_TTL_MS = 10 * 60 * 1000; // 10분 안에 답을 안 주면 대기 취소
-
-  GoombaBot.registerCommand("어구감시", {
-    category: "던전", adminOnly: true, summary: "어비스 구멍 자동 알림 시작/켜기/끄기", usage: ["!어구감시 시작 2026-07-30 14:00", "!어구감시 켜기", "!어구감시 끄기"],
-    detail: {
-      title: "\uD83D\uDD73 어구 감시", examples: ["!어구감시 시작 2026-07-30 14:00", "!어구감시 켜기", "!어구감시 끄기"],
-      features: [
-        "시작: 날짜/시간을 바로 붙이면 즉시 설정+자동알림 시작(!어구감시 시작 2026-07-30 14:00). 날짜 없이 \"시작\"만 치면 물어봅니다(일부 환경에서 이 대화형 방식이 안 걸릴 수 있음 - 그때는 날짜를 바로 붙여서 쓰세요)",
-        "켜기/끄기: 이미 기준시각이 설정된 상태에서 알림만 껐다 켰다 할 때"
-      ]
-    },
-    execute: function (chat) {
-      var sub = String(chat.args[0] || "");
-
-      if (sub === "시작") {
-        // ⚠️ 대화형(다음 메시지로 날짜 받기)이 일부 메신저봇R 환경에서 Event.MESSAGE가
-        // 안 걸려서 동작 안 하는 게 실기기로 확인됨 - "!어구감시 시작 2026-07-30 14:00"
-        // 처럼 날짜를 바로 붙여서 쓰면 대화형 단계 없이 즉시 설정+알림켜기까지 끝나도록
-        // 만든다(기존 대화형 방식은 인자 없이 "시작"만 쳤을 때는 그대로 남겨둔다).
-        var dateArg = String(chat.args[1] || "");
-        var timeArg = String(chat.args[2] || "");
-        if (dateArg) {
-          var msStart = parseAbyssDateTime(dateArg + " " + timeArg);
-          if (msStart === null) {
-            chat.reply(F.usageBlock(["!어구감시 시작 2026-07-30 14:00", "!어구감시 시작 (날짜 없이 치면 물어봅니다)"]));
-            return;
-          }
-          applyAbyssBaseTime(msStart);
-          GoombaBot.storage.write("abyss_monitor_enabled", true);
-          var nextStart = computeNextAbyssOccurrence(msStart, Date.now());
-          chat.reply(F.emoji.ok + " 어구 기준 시각을 " + formatDateTime(msStart) + "(으)로 설정하고 자동 알림을 시작했습니다.\n다음 생성: " + formatDateTime(nextStart));
-          return;
-        }
-
-        GoombaBot.storage.write("abyss_awaiting_input", { name: chat.author.name, room: chat.room.name, at: Date.now() });
-        chat.reply(F.emoji.calc + " 다음 어구 시간을 입력해주세요.\n(예: 2026-07-25 20:00)\n(또는 !어구감시 시작 2026-07-25 20:00 처럼 바로 붙여 쓰셔도 됩니다)");
-        return;
-      }
-      if (sub === "켜기") { GoombaBot.storage.write("abyss_monitor_enabled", true); chat.reply(F.emoji.ok + " 어구 자동 알림을 켰습니다."); return; }
-      if (sub === "끄기") { GoombaBot.storage.write("abyss_monitor_enabled", false); chat.reply(F.emoji.ok + " 어구 자동 알림을 껐습니다."); return; }
-      chat.reply(F.usageBlock(["!어구감시 시작 2026-07-30 14:00", "!어구감시 켜기", "!어구감시 끄기"]));
-    }
-  });
-
-  // ⚠️ "!어구감시 시작"으로 물어본 직후, "!"로 시작하지 않는 일반 메시지로 시간이
-  // 오면 그 값을 기준시각으로 잡고 알림도 자동으로 켠다. 대기 상태가 아니거나,
-  // 다른 사람이 보낸 메시지거나, 10분이 지났으면 완전히 무시한다(평소 잡담과 안 섞임).
-  GoombaBot.registerMessageHandler(function (chat) {
-    var awaiting = GoombaBot.storage.readStale("abyss_awaiting_input");
-    if (!awaiting) return false;
-    if (Date.now() - awaiting.at > ABYSS_AWAIT_TTL_MS) { GoombaBot.storage.write("abyss_awaiting_input", null); return false; }
-    if (String(chat.author.name) !== String(awaiting.name) || String(chat.room.name) !== String(awaiting.room)) return false;
-
-    var raw = null;
-    try { raw = chat.message; } catch (e1) {}
-    if (raw === null || raw === undefined) { try { raw = chat.content; } catch (e2) {} }
-    if (raw === null || raw === undefined) { try { raw = chat.msg; } catch (e3) {} }
-    if (raw === null || raw === undefined) { try { raw = chat.text; } catch (e4) {} }
-    if (raw === null || raw === undefined) return false;
-    if (String(raw).indexOf(String(GoombaBotConfig.commandPrefix)) === 0) return false; // "!"명령어는 이 핸들러 몫이 아님
-
-    var ms = parseAbyssDateTime(raw);
-    if (ms === null) {
-      chat.reply(F.emoji.warn + " 형식을 확인할 수 없습니다. 예) 2026-07-25 20:00");
-      return true; // 형식오류여도 이 메시지는 "어구시간 입력 시도"로 처리(잡담과 안 섞이게)
-    }
-
-    GoombaBot.storage.write("abyss_awaiting_input", null);
-    applyAbyssBaseTime(ms);
-    GoombaBot.storage.write("abyss_monitor_enabled", true);
-
-    var next = computeNextAbyssOccurrence(ms, Date.now());
-    chat.reply(F.emoji.ok + " 어구 기준 시각을 " + formatDateTime(ms) + "(으)로 설정하고 자동 알림을 시작했습니다.\n다음 생성: " + formatDateTime(next));
-    return true;
-  });
-
-  // ---- !심구 / !숙제 (API 미확인 - TODO) ----
-  function makeTodoCommand(name, label) {
-    GoombaBot.registerCommand(name, {
-      category: "던전", summary: label + " (API 확인 전)", usage: ["!" + name],
-      detail: { title: F.emoji.warn + " " + label, examples: ["!" + name], features: ["API가 아직 확인되지 않아 추측으로 정보를 만들지 않습니다"] },
-      execute: function (chat) {
-        chat.reply(F.box(F.emoji.warn + " " + label, [
-          "아직 실제 데이터를 연동하지 못했습니다.",
-          "tracker API 또는 별도 API가 확인되는 대로 채워 넣을 예정입니다.",
-          "(추측으로 정보를 만들지 않습니다.)"
-        ]));
-      }
-    });
-  }
-  makeTodoCommand("심구", "심층 구멍");
-  makeTodoCommand("숙제", "오늘의 숙제");
 })();
 
 module.exports = { GoombaBot: GoombaBot };
-

@@ -30,9 +30,9 @@ require("../core/router.js");
         { label: "점검상태", path: GoombaBotConfig.endpoints.maintenanceStatus },
         { label: "검은구멍", path: GoombaBotConfig.endpoints.deepHoleConfig },
         { label: "시세", path: GoombaBotConfig.endpoints.marketPrices + "?sort=pct_change_24h_desc&limit=100&offset=0" },
-        { label: "공식공지", path: GoombaBotConfig.endpoints.officialNotice },
-        { label: "공식이벤트", path: GoombaBotConfig.endpoints.officialEvents },
-        { label: "공식업데이트", path: GoombaBotConfig.endpoints.officialUpdate }
+        { label: "공식공지", path: GoombaBotConfig.endpoints.officialNotice, base64Wrapped: true },
+        { label: "공식이벤트", path: GoombaBotConfig.endpoints.officialEvents, base64Wrapped: true },
+        { label: "공식업데이트", path: GoombaBotConfig.endpoints.officialUpdate, base64Wrapped: true }
       ];
 
       var indexArg = parseInt(chat.args[0], 10);
@@ -40,7 +40,9 @@ require("../core/router.js");
 
       if (singleIndex !== -1) {
         var t = targets[singleIndex];
-        var r2 = GoombaBot.http.inspect(t.path, t.timeout);
+        // ⚠️ 공식공지/이벤트/업데이트는 Worker가 base64로 감싸서 보내므로(jsoup이
+        // 순수 텍스트를 오염시키는 문제 우회용) 전용 진단 함수로 풀어서 봐야 한다.
+        var r2 = t.base64Wrapped ? GoombaBot.http.inspectBase64Wrapped(t.path, t.timeout) : GoombaBot.http.inspect(t.path, t.timeout);
         var lines = [F.field("URL", r2.url)];
         if (!r2.ok) {
           lines.push(F.field("상태", F.emoji.red + " 실패 (" + r2.stage + ")"));
@@ -55,6 +57,13 @@ require("../core/router.js");
           if (r2.topKeys) lines.push(F.field("최상위 키", r2.topKeys.join(", ")));
           lines.push(F.field("배열 추출 개수", r2.arrayCount + "건"));
           if (r2.firstItemKeys) lines.push(F.field("첫 항목 실제 필드명", r2.firstItemKeys.join(", ")));
+          if (r2.firstItemTitle) lines.push(F.field("첫 항목 제목", r2.firstItemTitle));
+          // ⚠️ 공식 공지/이벤트/업데이트처럼 Worker가 HTML을 파싱하는 경우, 0건일 때
+          // 원인을 바로 알 수 있도록 Worker가 실어준 디버그 정보를 그대로 보여준다.
+          if (r2.debugInfo) {
+            lines.push("", F.field("(디버그) 받아온 HTML 길이", r2.debugInfo.htmlLength + "자"));
+            if (r2.debugInfo.newsAnchorCount !== undefined) lines.push(F.field("(디버그) News 링크 패턴 발견 개수", r2.debugInfo.newsAnchorCount));
+          }
         }
         chat.reply(F.box(F.emoji.admin + " API 진단 - " + t.label, lines));
         return;
@@ -62,7 +71,9 @@ require("../core/router.js");
 
       var out = [F.emoji.admin + " API 진단 (요약 - 상세: !진단 1~" + targets.length + ")", ""];
       for (var i = 0; i < targets.length; i++) {
-        var rr = GoombaBot.http.inspect(targets[i].path, targets[i].timeout);
+        var rr = targets[i].base64Wrapped
+          ? GoombaBot.http.inspectBase64Wrapped(targets[i].path, targets[i].timeout)
+          : GoombaBot.http.inspect(targets[i].path, targets[i].timeout);
         var icon = rr.ok ? F.emoji.green : F.emoji.red;
         var extra = rr.ok ? ("(" + rr.arrayCount + "건)") : ("(" + rr.stage + (rr.statusCode ? " " + rr.statusCode : "") + ")");
         out.push("[" + (i + 1) + "] " + icon + " " + targets[i].label + " " + extra);
@@ -200,7 +211,7 @@ require("../core/router.js");
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"../core/api.js":11,"../core/config.js":13,"../core/format.js":14,"../core/router.js":15}],2:[function(require,module,exports){
+},{"../core/api.js":12,"../core/config.js":14,"../core/format.js":15,"../core/router.js":16}],2:[function(require,module,exports){
 
 /**
  * commands/botcontrol.js
@@ -349,7 +360,7 @@ require("../core/router.js");
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"../core/api.js":11,"../core/config.js":13,"../core/format.js":14,"../core/router.js":15}],3:[function(require,module,exports){
+},{"../core/api.js":12,"../core/config.js":14,"../core/format.js":15,"../core/router.js":16}],3:[function(require,module,exports){
 
 /**
  * commands/fun.js
@@ -519,7 +530,7 @@ var funCommands = {
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"../core/cache.js":12,"../core/config.js":13,"../core/format.js":14,"../core/router.js":15}],4:[function(require,module,exports){
+},{"../core/cache.js":13,"../core/config.js":14,"../core/format.js":15,"../core/router.js":16}],4:[function(require,module,exports){
 
 /**
  * commands/homework.js
@@ -637,11 +648,22 @@ GoombaBot.provider = GoombaBot.provider || {};
    * "이 시간 이하로 남았고 + 아직 이 단계를 안 보냈으면" 방식으로 바꿔서 그런
    * 위험을 없앴다(모니터가 늦게 돌아도 다음 체크 때 확실히 잡힘).
    */
+  // ⚠️ 요청 반영 - 기존엔 30/15/5분전+시작시각 4단계였는데, "30분전/15분전 2번만,
+  // 스팸 방지를 위해 같은 회차엔 각 1회씩만" 요청받아서 2단계로 축소하고 메시지도
+  // 요청하신 박스 스타일(🍄 굼바 알림 + 생성예정 날짜/시간 + 남은시간)로 바꿨다.
+  // 중복방지는 기존 sentStages 기록 방식 그대로라 추가 작업 불필요(이미 회차당 1회만 감).
+  function buildAbyssStageMessage(next, minutesLabel) {
+    return F.box("\uD83C\uDF44 굼바 알림", [
+      "\uD83D\uDC41 어비스 구멍 생성 " + minutesLabel + "분 전입니다.",
+      "\uD83D\uDD52 생성 예정",
+      formatDateTime(next),
+      "남은 시간 : " + minutesLabel + "분"
+    ]);
+  }
+
   var ABYSS_STAGES = [
-    { key: "30min", ms: 30 * 60000, message: function (next) { return "\uD83E\uDE9D 어구까지 30분 남았습니다!\n\uD83D\uDD52 예정 시간 : " + formatTimeOnly(next); } },
-    { key: "15min", ms: 15 * 60000, message: function (next) { return "\uD83E\uDE9D 어구까지 15분 남았습니다!\n\uD83D\uDD52 예정 시간 : " + formatTimeOnly(next); } },
-    { key: "5min", ms: 5 * 60000, message: function (next) { return "\uD83E\uDE9D 어구까지 5분 남았습니다!\n\uD83D\uDD52 예정 시간 : " + formatTimeOnly(next); } },
-    { key: "start", ms: 0, message: function () { return "\uD83C\uDFA3 어구 시간입니다!"; } }
+    { key: "30min", ms: 30 * 60000, message: function (next) { return buildAbyssStageMessage(next, 30); } },
+    { key: "15min", ms: 15 * 60000, message: function (next) { return buildAbyssStageMessage(next, 15); } }
   ];
 
   /** 지금 이 순간(now) 기준으로, next 발생시각까지 이미 지나버린 단계들은 "보낸 것"으로
@@ -709,12 +731,13 @@ GoombaBot.provider = GoombaBot.provider || {};
   }
 
   GoombaBot.registerCommand("어구", {
-    category: "던전", summary: "다음 어비스 구멍 시간/남은시간/이후 일정, 개인 알림 등록", usage: ["!어구", "!어구 알림 30분뒤"],
+    category: "던전", summary: "다음 어비스 구멍 시간/남은시간/이후 일정, 개인 알림 등록", usage: ["!어구", "!어구 알림 30분뒤", "!어구 알림확인"],
     detail: {
-      title: "\uD83D\uDD73 어비스 구멍", examples: ["!어구", "!어구 알림 30분뒤"],
+      title: "\uD83D\uDD73 어비스 구멍", examples: ["!어구", "!어구 알림 30분뒤", "!어구 알림확인"],
       features: [
         "기준 시각 + 36시간 15분 간격으로 계산합니다(실시간 API 아님)",
         "!어구 알림 [N]분뒤(또는 분전)로 다음 생성 N분 전에 이 방으로 알림을 한 번 받을 수 있습니다(누구나 사용 가능)",
+        "!어구 알림확인으로 이 방에 등록된 알림이 실제로 저장돼 있는지, 발송 시각이 언제인지 확인할 수 있습니다",
         "관리자는 !어구기준으로 기준시각을 조정하고 !어구감시로 방 전체 자동알림을 켤 수 있습니다"
       ]
     },
@@ -722,6 +745,28 @@ GoombaBot.provider = GoombaBot.provider || {};
       // ⚠️ "!어구 알림 30분뒤" - 개인이 원하는 리드타임으로 일회성 알림을 등록한다.
       // 기존 "!어구감시"(관리자 전용, 방 전체, 30/15/5분+시작 고정 4단계)와는 별개의
       // 기능 - 이건 누구나 쓸 수 있고, 원하는 분 단위를 직접 지정할 수 있다.
+      // ⚠️ 트러블슈팅용 - 등록한 알림이 실제로 저장돼 있는지, 언제 발송 예정인지
+      // 직접 확인할 수 있게. "알림이 안 온다"는 문의가 들어와서 추가함(실기기에서
+      // Event.TICK 자체가 안 도는 건지, 등록이 잘못된 건지 구분하기 위함).
+      if (String(chat.args[0]) === "알림확인") {
+        var myPending = GoombaBot.storage.readStale("abyss_custom_alerts") || [];
+        var myRoomPending = [];
+        for (var pi = 0; pi < myPending.length; pi++) { if (myPending[pi].room === chat.room.name) myRoomPending.push(myPending[pi]); }
+        if (myRoomPending.length === 0) {
+          chat.reply(F.emoji.warn + " 이 방에 등록된 어구 알림이 없습니다.");
+          return;
+        }
+        var confirmLines = [];
+        var nowCheck = Date.now();
+        for (var ci = 0; ci < myRoomPending.length; ci++) {
+          var p = myRoomPending[ci];
+          confirmLines.push("생성 " + p.minutesBefore + "분 전 알림");
+          confirmLines.push("발송 예정 " + formatDateTime(p.alertAt) + (p.alertAt <= nowCheck ? " (지금쯤 발송됐어야 함 - 안 왔다면 !버전 확인 필요)" : " (아직 안 됨)"));
+        }
+        chat.reply(F.box("\uD83D\uDD14 등록된 어구 알림", confirmLines));
+        return;
+      }
+
       if (String(chat.args[0]) === "알림") {
         var minutes = parseMinutesArg(chat.args.slice(1).join(" "));
         if (minutes === null || minutes <= 0) {
@@ -971,7 +1016,7 @@ GoombaBot.provider = GoombaBot.provider || {};
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"../core/api.js":11,"../core/config.js":13,"../core/format.js":14,"../core/router.js":15}],5:[function(require,module,exports){
+},{"../core/api.js":12,"../core/config.js":14,"../core/format.js":15,"../core/router.js":16}],5:[function(require,module,exports){
 
 /**
  * commands/jobguide.js
@@ -1025,6 +1070,8 @@ var JOB_CYCLES = require("../data/job-cycles.json");
   }
 
   // ---- 직업 -> 개조번호 리스트 (skill-remodel.json은 번호->직업이라 반대로 뒤집는다) ----
+  // ⚠️ 제보 데이터가 있는 직업은 아래 CODE_TO_REPORTS/TAG 인덱스가 우선이고, 이건 제보가
+  // 아직 없는 직업(향후 추가 대비)을 위한 폴백으로만 남겨둔다.
   var JOB_TO_CODES = {};
   (function buildJobToCodes() {
     for (var code in SKILL_REMODEL) {
@@ -1046,6 +1093,43 @@ var JOB_CYCLES = require("../data/job-cycles.json");
       var tags = ENGRAVING[job];
       for (var i = 0; i < tags.length; i++) {
         if (tags[i].indexOf(tag) !== -1) { results.push(job); break; }
+      }
+    }
+    return results;
+  }
+
+  // ⚠️ 요청 반영 - "!직업명"과 "!개조"/"!세공"이 서로 다른 자료를 참고하면 혼란스럽다는
+  // 지적을 받아서, 이제 "제보의 영역"(rune-tier.json의 각 직업 .제보 배열)을 개조/세공
+  // 검색의 단일 출처로 통일한다. 개조코드→직업들, 세공태그→직업들 역인덱스를 여기서
+  // 미리 만들어둔다(직업당 조합이 여러 개일 수 있어서 코드/태그 하나가 여러 조합에
+  // 걸쳐 나올 수 있음 - 전부 따로 보여준다).
+  var CODE_TO_REPORTS = {}; // 개조코드 -> [{job, 조합, 세공, 비고}]
+  var ALL_REPORTS = [];     // 세공 태그 검색용 - {job, 조합, 세공, 비고} 전부
+  (function buildReportIndexes() {
+    for (var job in RUNE_TIER) {
+      if (!RUNE_TIER.hasOwnProperty(job)) continue;
+      var reports = RUNE_TIER[job].제보;
+      if (!reports) continue;
+      for (var i = 0; i < reports.length; i++) {
+        var r = reports[i];
+        var entry = { job: job, 조합: r.조합, 세공: r.세공, 비고: r.비고 };
+        ALL_REPORTS.push(entry);
+        if (r.개조) {
+          if (!CODE_TO_REPORTS[r.개조]) CODE_TO_REPORTS[r.개조] = [];
+          CODE_TO_REPORTS[r.개조].push(entry);
+        }
+      }
+    }
+  })();
+
+  /** 세공 태그(부분일치)로 제보 항목 검색 - 직업/조합/비고까지 같이 돌려준다 */
+  function findReportsByEngravingTag(tag) {
+    var results = [];
+    for (var i = 0; i < ALL_REPORTS.length; i++) {
+      var r = ALL_REPORTS[i];
+      if (!r.세공) continue;
+      for (var t = 0; t < r.세공.length; t++) {
+        if (r.세공[t].indexOf(tag) !== -1) { results.push(r); break; }
       }
     }
     return results;
@@ -1092,26 +1176,14 @@ var JOB_CYCLES = require("../data/job-cycles.json");
   var SECTION_LINE = "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501";
 
   /**
-   * 직업 종합 가이드 - "이것 하나만 보면 세팅 끝" 목표(요청 반영)로 개조/세공/룬티어
-   * (4개 부위 전부)/스탯/펫/사이클을 섹션 구분선으로 나눠서 한 번에 보여준다.
-   * 데이터 없는 섹션은 자동으로 안 보인다(스탯/펫/사이클은 아직 전 직업 데이터가
-   * 없어서 있는 직업만 표시 - 허용목록 방식과 동일한 원리).
+   * 직업 종합 가이드 - "이것 하나만 보면 세팅 끝" 목표로 태그/장신구/방어구/무기·엠블럼/
+   * 제보의 영역(개조+세공+비고)/스탯/펫/사이클을 섹션 구분선으로 나눠서 한 번에 보여준다.
+   * 데이터 없는 섹션은 자동으로 안 보인다.
    */
   function buildJobOverview(jobName) {
-    var lines = [jobIcon(jobName) + " " + jobName, "", SECTION_LINE];
-
-    lines.push("", "\uD83D\uDD27 추천 개조", "");
-    var codes = JOB_TO_CODES[jobName];
-    if (codes && codes.length) {
-      lines.push.apply(lines, formatRemodelList(codes));
-    } else {
-      lines.push("준비중입니다.");
-    }
-    lines.push("", SECTION_LINE);
-
-    lines.push("", "\uD83D\uDC8E 추천 세공", "");
-    var tags = ENGRAVING[jobName];
-    lines.push(tags && tags.length ? formatEngravingLine(tags) : "준비중입니다.");
+    var data = RUNE_TIER[jobName];
+    var lines = [jobIcon(jobName) + " " + jobName];
+    if (data && data.태그 && data.태그.length) lines.push(data.태그.join(" \u00B7 "));
     lines.push("", SECTION_LINE);
 
     var runeLines = buildRuneTierLines(jobName);
@@ -1119,6 +1191,28 @@ var JOB_CYCLES = require("../data/job-cycles.json");
       lines.push("", "\uD83E\uDDFF 추천 룬", "");
       lines.push.apply(lines, runeLines);
       lines.push("", SECTION_LINE);
+    }
+
+    var reportLines = buildReportLines(jobName);
+    if (reportLines.length) {
+      lines.push("", "\uD83D\uDCCB 제보의 영역", "");
+      lines.push.apply(lines, reportLines);
+      lines.push("", SECTION_LINE);
+    } else {
+      // 신규 스키마 데이터가 아직 없는 직업(있을 경우 대비) - 예전 방식(개조/세공 각각)으로 폴백
+      lines.push("", "\uD83D\uDD27 추천 개조", "");
+      var codes = JOB_TO_CODES[jobName];
+      lines.push.apply(lines, codes && codes.length ? formatRemodelList(codes) : ["준비중입니다."]);
+      lines.push("", SECTION_LINE);
+
+      lines.push("", "\uD83D\uDC8E 추천 세공", "");
+      var tags = ENGRAVING[jobName];
+      lines.push(tags && tags.length ? formatEngravingLine(tags) : "준비중입니다.");
+      lines.push("", SECTION_LINE);
+    }
+
+    if (data && data.참고) {
+      lines.push("", "\uD83D\uDCCC 참고", "", data.참고, "", SECTION_LINE);
     }
 
     if (JOB_STATS[jobName]) {
@@ -1149,30 +1243,69 @@ var JOB_CYCLES = require("../data/job-cycles.json");
   }
 
   var CATEGORY_ICONS = { "무기": "⚔️", "방어구": "\uD83D\uDEE1\uFE0F", "장신구": "\uD83D\uDC8D", "엠블럼": "\uD83D\uDD37" };
-  var CATEGORY_ORDER = ["무기", "방어구", "장신구", "엠블럼"];
-  var CIRCLED = ["①", "②", "③", "④", "⑤", "⑥", "⑦"];
+  var ARMOR_SUBCATS = ["각성", "용문장", "침식", "그외"];
+  var ARMOR_SUBCAT_LABEL = { "각성": "각성", "용문장": "용문장", "침식": "침식", "그외": "그 외" };
 
   /**
-   * 룬티어 - 카테고리별로 헤더를 붙여 구분, 전 카테고리 원문자(①②③)로 통일(요청 반영).
-   * 방어구는 룬 슬롯이 5개라 5개까지, 나머지(무기/장신구/엠블럼)는 3개까지 보여준다.
-   * ⚠️ 방어구 데이터는 이미지의 "종합 추천 순위" 하나뿐이라, 실제 슬롯별(투구/상의/
-   * 하의/장갑/신발 등) 구분은 아직 없다 - 나중에 슬롯별 데이터를 받으면 확장하면 된다.
-   * 제목 없이 본문 라인 배열만 돌려준다(overview/상세 양쪽에서 재사용하기 위함).
+   * 신규 룬티어 스키마 렌더링(2026-08 자료 갱신 반영).
+   * ⚠️ 기존엔 "무기/방어구/장신구/엠블럼"이 그냥 이름 나열 배열이었는데, 이번에
+   * 받은 자료는 장신구가 채용률 구간별(60%/30%/10%)로, 방어구가 각성/용문장/침식/
+   * 그외로 나뉘어 있고, 무기/엠블럼에 "대체" 옵션이 따로 있어서 스키마 자체를
+   * 확장했다(rune-tier.json 참고). 사람이 스크린샷을 옮겨적은 것이라 오탈자가
+   * 있을 수 있음 - 발견되면 rune-tier.json만 고치면 된다.
    */
   function buildRuneTierLines(jobName) {
     var data = RUNE_TIER[jobName];
     if (!data) return [];
     var lines = [];
-    for (var c = 0; c < CATEGORY_ORDER.length; c++) {
-      var cat = CATEGORY_ORDER[c];
-      var list = data[cat];
-      if (!list || !list.length) continue;
-      var showCount = (cat === "방어구") ? 5 : 3;
-      if (lines.length) lines.push("");
-      lines.push((CATEGORY_ICONS[cat] || "") + " " + cat);
-      for (var i = 0; i < Math.min(list.length, showCount); i++) {
-        lines.push((CIRCLED[i] || (i + 1) + ".") + " " + list[i]);
+
+    if (data.장신구) {
+      lines.push(CATEGORY_ICONS.장신구 + " 장신구");
+      for (var tier in data.장신구) {
+        if (!data.장신구.hasOwnProperty(tier)) continue;
+        lines.push(tier + " : " + data.장신구[tier].join(" \u00B7 "));
       }
+    }
+
+    if (data.방어구) {
+      if (lines.length) lines.push("");
+      lines.push(CATEGORY_ICONS.방어구 + " 방어구");
+      for (var a = 0; a < ARMOR_SUBCATS.length; a++) {
+        var subcat = ARMOR_SUBCATS[a];
+        var list = data.방어구[subcat];
+        if (!list || !list.length) continue;
+        lines.push(ARMOR_SUBCAT_LABEL[subcat] + " : " + list.join(" \u00B7 "));
+      }
+    }
+
+    if (data.무기) {
+      if (lines.length) lines.push("");
+      var weaponLine = CATEGORY_ICONS.무기 + " 무기 : " + data.무기.주력.join(" \u00B7 ");
+      if (data.무기.대체 && data.무기.대체.length) weaponLine += " (대체: " + data.무기.대체.join(", ") + ")";
+      lines.push(weaponLine);
+    }
+
+    if (data.엠블럼) {
+      var emblemLine = CATEGORY_ICONS.엠블럼 + " 엠블럼 : " + data.엠블럼.주력.join(" \u00B7 ");
+      if (data.엠블럼.대체 && data.엠블럼.대체.length) emblemLine += " (대체: " + data.엠블럼.대체.join(", ") + ")";
+      lines.push(emblemLine);
+    }
+
+    return lines;
+  }
+
+  /** 제보의 영역 - 조합별로 번호 매겨서 개조/세공/비고를 묶어 보여준다(스크린샷의 "제보의 영역" 표 그대로) */
+  function buildReportLines(jobName) {
+    var data = RUNE_TIER[jobName];
+    if (!data || !data.제보 || !data.제보.length) return [];
+    var lines = [];
+    for (var i = 0; i < data.제보.length; i++) {
+      var r = data.제보[i];
+      if (i > 0) lines.push("");
+      lines.push(circledMark(i) + " " + r.조합);
+      if (r.개조) lines.push("개조 " + r.개조);
+      if (r.세공 && r.세공.length) lines.push("세공 " + r.세공.join(" \u00B7 "));
+      if (r.비고) lines.push("비고 " + r.비고);
     }
     return lines;
   }
@@ -1202,24 +1335,40 @@ var JOB_CYCLES = require("../data/job-cycles.json");
   var SUBCOMMANDS = {
     "룬티어": function (jobName) { return buildRuneTierDetail(jobName) || (F.emoji.warn + " " + jobName + "의 룬티어 데이터가 없습니다."); },
     "개조": function (jobName) {
-      var codes = JOB_TO_CODES[jobName];
+      var reports = RUNE_TIER[jobName] && RUNE_TIER[jobName].제보;
       var lines = [jobIcon(jobName) + " " + jobName + " 개조", ""];
-      if (codes && codes.length) {
-        lines.push.apply(lines, formatRemodelList(codes));
+      if (reports && reports.length) {
+        for (var i = 0; i < reports.length; i++) {
+          if (!reports[i].개조) continue;
+          if (lines.length > 2) lines.push("");
+          lines.push(circledMark(i) + " " + reports[i].조합);
+          lines.push("개조 " + reports[i].개조);
+          if (reports[i].비고) lines.push("비고 " + reports[i].비고);
+        }
+        if (lines.length === 2) lines.push("준비중입니다.");
       } else {
-        lines.push("준비중입니다.");
+        var codes = JOB_TO_CODES[jobName];
+        lines.push.apply(lines, codes && codes.length ? formatRemodelList(codes) : ["준비중입니다."]);
       }
       return lines.join("\n");
     },
     "세공": function (jobName) {
-      var tags = ENGRAVING[jobName];
-      var lines = [jobIcon(jobName) + " " + jobName + " 세공", ""];
-      if (tags && tags.length) {
-        lines.push(formatEngravingLine(tags));
+      var reports2 = RUNE_TIER[jobName] && RUNE_TIER[jobName].제보;
+      var lines2 = [jobIcon(jobName) + " " + jobName + " 세공", ""];
+      if (reports2 && reports2.length) {
+        for (var j2 = 0; j2 < reports2.length; j2++) {
+          if (!reports2[j2].세공) continue;
+          if (lines2.length > 2) lines2.push("");
+          lines2.push(circledMark(j2) + " " + reports2[j2].조합);
+          lines2.push("세공 " + formatEngravingLine(reports2[j2].세공));
+          if (reports2[j2].비고) lines2.push("비고 " + reports2[j2].비고);
+        }
+        if (lines2.length === 2) lines2.push("준비중입니다.");
       } else {
-        lines.push("준비중입니다.");
+        var tags = ENGRAVING[jobName];
+        lines2.push(tags && tags.length ? formatEngravingLine(tags) : "준비중입니다.");
       }
-      return lines.join("\n");
+      return lines2.join("\n");
     },
     "스탯": function (jobName) {
       var list = JOB_STATS[jobName];
@@ -1274,7 +1423,7 @@ var JOB_CYCLES = require("../data/job-cycles.json");
   // ---- !개조 [번호] ----
   GoombaBot.registerCommand("개조", {
     category: "정보", summary: "개조 목록/번호로 사용 직업 검색", usage: ["!개조", "!개조 135"],
-    detail: { title: "\uD83D\uDD2E 개조 검색", examples: ["!개조", "!개조 135"], features: ["!개조만 치면 전 직업 추천 개조 목록, !개조 135처럼 번호를 입력하면 그 개조를 쓰는 직업들을 보여줍니다"] },
+    detail: { title: "\uD83D\uDD2E 개조 검색", examples: ["!개조", "!개조 135"], features: ["!개조만 치면 전 직업 추천 개조 목록, !개조 135처럼 번호를 입력하면 그 개조를 쓰는 직업들을 조합/세공/비고와 함께 보여줍니다"] },
     execute: function (chat) {
       var code = String(chat.args[0] || "").trim();
 
@@ -1282,20 +1431,23 @@ var JOB_CYCLES = require("../data/job-cycles.json");
         var lines0 = ["\uD83D\uDD2E 개조 목록", ""];
         var sortedJobs = JOB_NAMES.slice().sort(function (a, b) { return a < b ? -1 : (a > b ? 1 : 0); });
         for (var j = 0; j < sortedJobs.length; j++) {
-          var jobCodes = JOB_TO_CODES[sortedJobs[j]];
-          if (!jobCodes || !jobCodes.length) continue;
+          var reportLines = buildReportLines(sortedJobs[j]);
+          if (!reportLines.length) continue;
           lines0.push(sortedJobs[j]);
-          lines0.push.apply(lines0, formatRemodelList(jobCodes));
+          lines0.push.apply(lines0, reportLines);
           lines0.push("");
         }
         chat.reply(lines0.join("\n").replace(/\n+$/, ""));
         return;
       }
 
-      if (!SKILL_REMODEL.hasOwnProperty(code)) { chat.reply(F.emoji.warn + " '" + code + "' 개조 데이터가 없습니다."); return; }
-      var entries = SKILL_REMODEL[code];
+      var codeReports = CODE_TO_REPORTS[code];
+      if (!codeReports || !codeReports.length) { chat.reply(F.emoji.warn + " '" + code + "' 개조 데이터가 없습니다."); return; }
       var lines = ["\uD83D\uDD2E 개조 " + code, "", "사용 직업"];
-      for (var i = 0; i < entries.length; i++) lines.push("• " + entries[i].job + (entries[i].note ? " (" + entries[i].note + ")" : ""));
+      for (var i = 0; i < codeReports.length; i++) {
+        var cr = codeReports[i];
+        lines.push("• " + cr.job + " (" + cr.조합 + ")" + (cr.비고 ? " - " + cr.비고 : ""));
+      }
       chat.reply(lines.join("\n"));
     }
   });
@@ -1303,7 +1455,7 @@ var JOB_CYCLES = require("../data/job-cycles.json");
   // ---- !세공 [태그] ----
   GoombaBot.registerCommand("세공", {
     category: "정보", summary: "세공 목록/태그로 사용 직업 검색", usage: ["!세공", "!세공 강타"],
-    detail: { title: "\uD83D\uDC8E 세공 검색", examples: ["!세공", "!세공 강타"], features: ["!세공만 치면 전 직업 추천 세공 목록, !세공 강타처럼 태그를 입력하면 그 태그를 추천하는 직업들을 보여줍니다"] },
+    detail: { title: "\uD83D\uDC8E 세공 검색", examples: ["!세공", "!세공 강타"], features: ["!세공만 치면 전 직업 추천 세공 목록, !세공 강타처럼 태그를 입력하면 그 태그를 추천하는 직업들을 조합/비고와 함께 보여줍니다"] },
     execute: function (chat) {
       var tag = String(chat.args[0] || "").trim();
 
@@ -1311,20 +1463,23 @@ var JOB_CYCLES = require("../data/job-cycles.json");
         var lines0 = ["\uD83D\uDC8E 세공 목록", ""];
         var sortedJobs = JOB_NAMES.slice().sort(function (a, b) { return a < b ? -1 : (a > b ? 1 : 0); });
         for (var j = 0; j < sortedJobs.length; j++) {
-          var jobTags = ENGRAVING[sortedJobs[j]];
-          if (!jobTags || !jobTags.length) continue;
+          var reportLines = buildReportLines(sortedJobs[j]);
+          if (!reportLines.length) continue;
           lines0.push(sortedJobs[j]);
-          lines0.push(formatEngravingLine(jobTags));
+          lines0.push.apply(lines0, reportLines);
           lines0.push("");
         }
         chat.reply(lines0.join("\n").replace(/\n+$/, ""));
         return;
       }
 
-      var jobs = findJobsByEngravingTag(tag);
+      var tagReports = findReportsByEngravingTag(tag);
       var lines = ["\uD83D\uDC8E " + tag + " 태그 사용 직업", ""];
-      if (jobs.length === 0) { lines.push("해당 태그를 추천하는 직업이 없습니다."); } else {
-        for (var i = 0; i < jobs.length; i++) lines.push("• " + jobs[i]);
+      if (tagReports.length === 0) { lines.push("해당 태그를 추천하는 직업이 없습니다."); } else {
+        for (var i = 0; i < tagReports.length; i++) {
+          var tr = tagReports[i];
+          lines.push("• " + tr.job + " (" + tr.조합 + ")" + (tr.비고 ? " - " + tr.비고 : ""));
+        }
       }
       chat.reply(lines.join("\n"));
     }
@@ -1334,7 +1489,7 @@ var JOB_CYCLES = require("../data/job-cycles.json");
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"../core/api.js":11,"../core/config.js":13,"../core/format.js":14,"../core/router.js":15,"../data/engraving.json":16,"../data/job-aliases.json":17,"../data/job-cycles.json":18,"../data/job-pets.json":19,"../data/job-stats.json":20,"../data/rune-tier.json":21,"../data/skill-remodel.json":22}],6:[function(require,module,exports){
+},{"../core/api.js":12,"../core/config.js":14,"../core/format.js":15,"../core/router.js":16,"../data/engraving.json":17,"../data/job-aliases.json":18,"../data/job-cycles.json":19,"../data/job-pets.json":20,"../data/job-stats.json":21,"../data/rune-tier.json":22,"../data/skill-remodel.json":24}],6:[function(require,module,exports){
 
 /**
  * commands/maintenance.js
@@ -1404,15 +1559,20 @@ GoombaBot.provider = GoombaBot.provider || {};
 
   // ---- !공지 ----
   GoombaBot.registerCommand("공지", {
-    category: "공지", summary: "최근 공지 5개 / 공식 공지·업데이트 자동알림 켜기·끄기", usage: ["!공지", "!공지 켜기", "!공지 끄기"],
+    category: "공지", summary: "최근 공지 5개 / 공식 공지·업데이트 자동알림 켜기·끄기", usage: ["!공지", "!공지 켜기", "!공지 끄기", "!공지 테스트"],
     detail: {
-      title: F.emoji.notice + " 공지 조회", examples: ["!공지", "!공지 켜기"],
-      features: ["최근 공지 5개를 보여줍니다", "!공지 켜기/끄기로 이 방에서 마비노기 모바일 공식 공지·업데이트 자동알림을 받을지 정할 수 있습니다"]
+      title: F.emoji.notice + " 공지 조회", examples: ["!공지", "!공지 켜기", "!공지 테스트"],
+      features: [
+        "최근 공지 5개를 보여줍니다",
+        "!공지 켜기/끄기로 이 방에서 마비노기 모바일 공식 공지·업데이트 자동알림을 받을지 정할 수 있습니다",
+        "!공지 테스트로 실제 발송되는 형식을 미리 볼 수 있습니다(실제 알림은 아님, 나에게만 보임)"
+      ]
     },
     execute: function (chat) {
-      // ⚠️ 신규 - 공식 홈페이지 자동알림 켜기/끄기(officialnews.js). 켜기/끄기가
-      // 아니면 아래 기존 동작(최근 공지 5개 조회)을 그대로 수행한다.
+      // ⚠️ 신규 - 공식 홈페이지 자동알림 켜기/끄기 및 테스트 미리보기(officialnews.js).
+      // 해당 없으면 아래 기존 동작(최근 공지 5개 조회)을 그대로 수행한다.
       if (GoombaBot.officialNews && GoombaBot.officialNews.handleToggleSub(chat, "공지", "공지·업데이트")) return;
+      if (GoombaBot.officialNews && GoombaBot.officialNews.handleTestSub(chat, "공지")) return;
 
       var notices = P.getNotices(5);
       if (notices.length === 0) { chat.reply(F.emoji.warn + " 공지사항을 가져오지 못했습니다."); return; }
@@ -1424,15 +1584,20 @@ GoombaBot.provider = GoombaBot.provider || {};
 
   // ---- !점검 ----
   GoombaBot.registerCommand("점검", {
-    category: "공지", summary: "점검 상태 확인 (🟢/🔴 아이콘) / 공식 점검 자동알림 켜기·끄기", usage: ["!점검", "!점검 켜기", "!점검 끄기"],
+    category: "공지", summary: "점검 상태 확인 (🟢/🔴 아이콘) / 공식 점검 자동알림 켜기·끄기", usage: ["!점검", "!점검 켜기", "!점검 끄기", "!점검 테스트"],
     detail: {
-      title: F.emoji.maintenance + " 점검 상태", examples: ["!점검", "!점검 켜기"],
-      features: ["🟢 정상운영 / 🔴 점검중을 한눈에 보여줍니다", "!점검 켜기/끄기로 이 방에서 공식 점검 시작·종료·연장 자동알림을 받을지 정할 수 있습니다"]
+      title: F.emoji.maintenance + " 점검 상태", examples: ["!점검", "!점검 켜기", "!점검 테스트"],
+      features: [
+        "🟢 정상운영 / 🔴 점검중을 한눈에 보여줍니다",
+        "!점검 켜기/끄기로 이 방에서 공식 점검 시작·종료·연장 자동알림을 받을지 정할 수 있습니다",
+        "!점검 테스트로 실제 발송되는 형식을 미리 볼 수 있습니다(실제 알림은 아님, 나에게만 보임)"
+      ]
     },
     execute: function (chat) {
-      // ⚠️ 신규 - 공식 홈페이지 점검 자동알림 켜기/끄기(officialnews.js). 켜기/끄기가
-      // 아니면 아래 기존 동작(점검 상태 조회)을 그대로 수행한다.
+      // ⚠️ 신규 - 공식 홈페이지 점검 자동알림 켜기/끄기 및 테스트 미리보기(officialnews.js).
+      // 해당 없으면 아래 기존 동작(점검 상태 조회)을 그대로 수행한다.
       if (GoombaBot.officialNews && GoombaBot.officialNews.handleToggleSub(chat, "점검", "점검")) return;
+      if (GoombaBot.officialNews && GoombaBot.officialNews.handleTestSub(chat, "점검")) return;
 
       var status = P.getMaintenanceStatus();
       if (!status.ok) { chat.reply(F.emoji.warn + " 점검 상태를 가져오지 못했습니다."); return; }
@@ -1532,7 +1697,7 @@ GoombaBot.registerMonitor("점검알림모니터", {
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"../core/api.js":11,"../core/config.js":13,"../core/format.js":14,"../core/router.js":15}],7:[function(require,module,exports){
+},{"../core/api.js":12,"../core/config.js":14,"../core/format.js":15,"../core/router.js":16}],7:[function(require,module,exports){
 
 /**
  * commands/market.js
@@ -1587,6 +1752,13 @@ GoombaBot.provider = GoombaBot.provider || {};
 
   GoombaBot.provider.getMarketCatalog = getMarketCatalog;
   GoombaBot.provider.searchMarket = searchMarket;
+  // ⚠️ "!시세 새로고침"용 - 메모리(memoize)+디스크(storage) 캐시를 둘 다 비워야
+  // 다음 조회에서 진짜로 새로 가져온다. 하나만 비우면 나머지 캐시가 여전히 예전
+  // 데이터를 돌려줘서 소용없다.
+  GoombaBot.provider.resetMarketCatalog = function () {
+    getMarketCatalog.reset();
+    GoombaBot.storage.remove("market_catalog");
+  };
 })();
 
 (function () {
@@ -1606,12 +1778,31 @@ GoombaBot.provider = GoombaBot.provider || {};
 
   // ---- !시세 ----
   GoombaBot.registerCommand("시세", {
-    category: "거래소", summary: "거래소 시세 조회", usage: ["!시세 아이템명", "!시세 마력석"],
+    category: "거래소", summary: "거래소 시세 조회", usage: ["!시세 아이템명", "!시세 마력석", "!시세 새로고침"],
     detail: {
       title: F.emoji.market + " 거래소 시세", examples: ["!시세 켈틱류트", "!시세 마력석"],
-      features: ["이름이 정확히 일치하면 바로 시세를 보여줍니다", "최저가/평균가/최고가를 보여줍니다"]
+      features: [
+        "이름이 정확히 일치하면 바로 시세를 보여줍니다",
+        "최저가/평균가/최고가를 보여줍니다",
+        "시세는 15분마다 자동 갱신됩니다. 급하면 관리자가 !시세 새로고침으로 즉시 갱신할 수 있습니다"
+      ]
     },
     execute: function (chat) {
+      // ⚠️ 신규 - 관리자가 캐시를 강제로 비우고 새로 가져오게 하는 서브커맨드.
+      // 요청받은 배경: 새 품목이 등록돼도 캐시(15분) 때문에 바로 안 보이는 문제.
+      if (String(chat.args[0]) === "새로고침") {
+        if (!GoombaBot.isAdmin(chat.author.name)) {
+          chat.reply(F.emoji.warn + " 이 기능은 관리자만 사용할 수 있습니다.");
+          return;
+        }
+        P.resetMarketCatalog();
+        var refreshed = P.getMarketCatalog();
+        chat.reply(refreshed.length > 0
+          ? F.emoji.ok + " 시세 캐시를 새로고침했습니다 (" + refreshed.length + "건)"
+          : F.emoji.warn + " 새로고침 시도했지만 데이터를 가져오지 못했습니다.");
+        return;
+      }
+
       var keyword = chat.args.join(" ").trim();
       if (!keyword) { chat.reply(F.usageBlock(["!시세 아이템명", "!시세 마력석"])); return; }
 
@@ -1678,7 +1869,7 @@ GoombaBot.provider = GoombaBot.provider || {};
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"../core/api.js":11,"../core/config.js":13,"../core/format.js":14,"../core/router.js":15}],8:[function(require,module,exports){
+},{"../core/api.js":12,"../core/config.js":14,"../core/format.js":15,"../core/router.js":16}],8:[function(require,module,exports){
 
 /**
  * commands/officialnews.js
@@ -1715,13 +1906,32 @@ GoombaBot.provider = GoombaBot.provider || {};
 (function () {
   var E = GoombaBotConfig.endpoints;
 
+  /**
+   * ⚠️ Worker가 이제 응답을 base64로 감싸서 보낸다({b64: "..."} 형태) - 실기기에서
+   * 응답이 매번 비슷한 지점에서 잘리고 콜론 같은 평범한 문자까지 사라지는 현상이
+   * 반복 확인됐는데, 이 프로젝트에서 예전에 "jsoup이 순수 텍스트를 HTML로 취급해서
+   * 오염시키는" 문제를 겪은 전례와 같은 부류로 보여서 같은 해법(base64로 감싸기)을
+   * 적용했다. base64 문자열(영문/숫자/+/=)은 HTML 파서가 오해할 여지가 없다.
+   * GoombaBot.http.base64Decode()는 loader.js와 동일한 UTF-8 안전 디코더라 그대로 재사용.
+   */
+  function decodeNewsResponse(json) {
+    if (!json || typeof json.b64 !== "string") return { items: [] };
+    var decoded = GoombaBot.http.base64Decode(json.b64);
+    return JSON.parse(decoded);
+  }
+
   function fetchNewsList(path, cacheKey) {
+    // ⚠️ 빈 배열([])도 "캐시 있음"으로 취급되면, 예전에 파싱 실패로 0건이 캐시된
+    // 경우 10분 동안 새로 고쳐진 결과를 가리게 되는 문제가 실기기에서 확인됨
+    // (!공지 테스트가 방금 고친 뒤에도 "0건"이라고 계속 나왔음) - 빈 배열은 캐시로
+    // 인정하지 않고 매번 새로 가져오도록 수정.
     var cached = GoombaBot.storage.read(cacheKey, GoombaBotConfig.cacheTtlMs.notice);
-    if (cached) return cached;
+    if (cached && cached.length > 0) return cached;
     try {
-      var json = GoombaBot.http.getJson(path);
+      var raw = GoombaBot.http.getJson(path);
+      var json = decodeNewsResponse(raw);
       var items = (json && json.items) ? json.items : [];
-      GoombaBot.storage.write(cacheKey, items);
+      if (items.length > 0) GoombaBot.storage.write(cacheKey, items);
       return items;
     } catch (e) {
       GoombaBot.log("공식 홈페이지 목록 조회 실패(" + path + "): " + e);
@@ -1735,9 +1945,12 @@ GoombaBot.provider = GoombaBot.provider || {};
   // (사용자가 수동으로 치는 !공지/!이벤트/!패치는 기존처럼 캐시된 fetchNewsList 사용).
   function fetchNewsListFresh(path, cacheKey) {
     try {
-      var json = GoombaBot.http.getJson(path);
+      var raw = GoombaBot.http.getJson(path);
+      var json = decodeNewsResponse(raw);
       var items = (json && json.items) ? json.items : [];
-      GoombaBot.storage.write(cacheKey, items); // 사용자용 캐시도 최신으로 같이 갱신해준다
+      // ⚠️ 빈 배열이면 캐시를 덮어쓰지 않는다 - 일시적으로 0건이 나온 경우
+      // 기존에 저장된 정상 캐시가 날아가지 않게 하기 위함(사용자용 !공지 등에 영향).
+      if (items.length > 0) GoombaBot.storage.write(cacheKey, items);
       return items;
     } catch (e) {
       GoombaBot.log("공식 홈페이지 목록 조회 실패(모니터, " + path + "): " + e);
@@ -1769,11 +1982,24 @@ GoombaBot.provider = GoombaBot.provider || {};
   // 위해 내용 분석 필요, 지금은 제목에 이미 종류/시간이 다 들어있어서 이걸로 충분함) ----
   function isMaintenanceTitle(title) { return /정기\s*점검|임시\s*점검|긴급\s*점검|점검\s*안내/.test(title); }
   function isEmergencyTitle(title) { return /긴급\s*점검|임시\s*점검/.test(title); }
-  function isDoneTitle(title) { return /^\s*\(완료\)/.test(title); }
+  function isDoneTitle(title) { return /^\s*(\(완료\)|완료\s)/.test(title); }
   function extractTimeRange(title) {
     var m = title.match(/(\d{1,2}):(\d{2})\s*~\s*(\d{1,2}):(\d{2})/);
     if (!m) return null;
     return m[1] + ":" + m[2] + " ~ " + m[3] + ":" + m[4];
+  }
+  /** 연장 감지는 전체 시간대 문자열이 아니라 "종료 시각"만 비교한다(요청 반영) -
+   * 시작시각은 그대로고 종료시각만 늘어나는 게 "연장"의 정확한 의미이기 때문. */
+  function extractEndTime(title) {
+    var m = title.match(/(\d{1,2}):(\d{2})\s*~\s*(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    return m[3] + ":" + m[4];
+  }
+  /** 공지 하나의 상태를 "일반"/"점검시작"/"점검종료" 중 하나로 판정한다(요청 반영 -
+   * id+제목뿐 아니라 상태값 자체를 저장해서 비교에 쓴다). */
+  function computeStatus(title) {
+    if (!isMaintenanceTitle(title)) return "일반";
+    return isDoneTitle(title) ? "점검종료" : "점검시작";
   }
 
   // ---- 방별 설정 저장 (기본값: 전부 꺼짐 - 기존 방에 갑자기 스팸처럼 안 오도록) ----
@@ -1798,7 +2024,8 @@ GoombaBot.provider = GoombaBot.provider || {};
 
   GoombaBot.officialNews = {
     isMaintenanceTitle: isMaintenanceTitle, isEmergencyTitle: isEmergencyTitle,
-    isDoneTitle: isDoneTitle, extractTimeRange: extractTimeRange,
+    isDoneTitle: isDoneTitle, extractTimeRange: extractTimeRange, extractEndTime: extractEndTime,
+    computeStatus: computeStatus,
     getRoomSetting: getRoomSetting, setRoomSetting: setRoomSetting, roomsWanting: roomsWanting
   };
 
@@ -1810,6 +2037,46 @@ GoombaBot.provider = GoombaBot.provider || {};
     if (sub === "켜기") { setRoomSetting(chat.room.name, key, true); chat.reply(F.emoji.ok + " 이 방에서 공식 " + label + " 자동알림을 켰습니다."); return true; }
     if (sub === "끄기") { setRoomSetting(chat.room.name, key, false); chat.reply(F.emoji.ok + " 이 방에서 공식 " + label + " 자동알림을 껐습니다."); return true; }
     return false; // 켜기/끄기가 아니면 처리 안 함 - 호출부(기존 명령어)가 원래 하던 동작을 마저 하면 됨
+  };
+
+  // ---- "!공지 테스트" / "!점검 테스트" - 실제 공지가 올라올 때까지 안 기다리고
+  // 실제 발송 형식 그대로 미리 볼 수 있게 하는 미리보기(요청 반영). **실제 API에서
+  // 가져온 최신 데이터를 그대로 사용한다**(예전엔 하드코딩된 문구였는데, 실제 데이터로
+  // 확인하고 싶다는 요청을 받아서 수정함) - seenMap/저장된 상태는 안 건드리고, 그
+  // 자리에서 chat.reply로만 보여준다(실제 방 브로드캐스트 아님).
+  GoombaBot.officialNews.handleTestSub = function (chat, key) {
+    if (String(chat.args[0]) !== "테스트") return false;
+
+    var notices = GoombaBot.provider.getOfficialNotices();
+    if (notices.length === 0) {
+      chat.reply(F.emoji.warn + " 지금 공식 공지 데이터를 하나도 못 가져왔습니다(파싱 실패 또는 0건). !진단 11로 원인을 확인해주세요.");
+      return true;
+    }
+
+    if (key === "공지") {
+      var latest = notices[0];
+      chat.reply([
+        "\uD83D\uDEA8 새 공지사항 발견! (테스트 미리보기)", "",
+        "\uD83D\uDCDD " + latest.title, "",
+        "\uD83D\uDD17 " + latest.url
+      ].join("\n"));
+      return true;
+    }
+    if (key === "점검") {
+      var maint = null;
+      for (var i = 0; i < notices.length; i++) { if (isMaintenanceTitle(notices[i].title)) { maint = notices[i]; break; } }
+      if (!maint) { chat.reply(F.emoji.warn + " 지금 목록에 점검 관련 공지가 없어서 테스트 미리보기를 만들 수 없습니다."); return true; }
+      var range = extractTimeRange(maint.title);
+      var lines = [
+        (isEmergencyTitle(maint.title) ? "\uD83D\uDEA8 긴급 점검" : "\uD83D\uDEA8 서버 점검 시작") + " (테스트 미리보기)",
+        "", maint.title
+      ];
+      if (range) lines.push("", "\uD83D\uDD52 시간", range);
+      lines.push("", maint.url);
+      chat.reply(lines.join("\n"));
+      return true;
+    }
+    return false;
   };
 
   // ---- !이벤트 (신규 명령어) ----
@@ -1880,15 +2147,23 @@ GoombaBot.provider = GoombaBot.provider || {};
     }
   }
 
-  /** 공지 목록 처리 - 새 글/점검 시작·긴급점검/점검 종료/점검 연장을 전부 여기서 판단한다 */
-  function processNoticeList(items, seenMap) {
+  /**
+   * 공지 목록 처리 - 새 글/점검 시작·긴급점검/점검 종료/점검 연장을 전부 여기서 판단한다.
+   * ⚠️ 요청 반영 - 각 글마다 {제목, 상태(일반/점검시작/점검종료), 종료시각, 마지막확인시각}을
+   * 전부 저장해서 비교한다(이전엔 제목+완료여부만 저장했음). 이 저장 자체가 Database에
+   * 영구 보관되므로, Worker나 봇이 재시작돼도 "이미 알린 상태"는 그대로 남아있어 같은
+   * 알림이 중복 발송되지 않는다(요청 2번 - 중복 알림 방지).
+   */
+  function processNoticeList(items, seenMap, nowTs) {
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
       var prev = seenMap[item.id];
+      var status = N.computeStatus(item.title);
+      var endTime = N.extractEndTime(item.title);
 
       if (!prev) {
         // 신규 글
-        if (N.isMaintenanceTitle(item.title)) {
+        if (status === "점검시작") {
           var timeRange = N.extractTimeRange(item.title);
           var isEmergency = N.isEmergencyTitle(item.title);
           var lines = [
@@ -1899,51 +2174,52 @@ GoombaBot.provider = GoombaBot.provider || {};
           if (timeRange) lines.push("", "\uD83D\uDD52 시간", timeRange);
           lines.push("", item.url);
           broadcast(N.roomsWanting("점검"), lines.join("\n"));
-        } else {
+        } else if (status === "일반") {
           broadcast(N.roomsWanting("공지"), [
-            "\uD83D\uDCE2 마비노기 공식 공지", "", item.title, "", item.url
+            "\uD83D\uDEA8 새 공지사항 발견!", "",
+            "\uD83D\uDCDD " + item.title, "",
+            "\uD83D\uDD17 " + item.url
           ].join("\n"));
         }
-        seenMap[item.id] = { title: item.title, isDone: N.isDoneTitle(item.title) };
+        // status === "점검종료"인 글이 "신규"로 잡히는 경우(예: 봇 다운 중에 시작→종료가
+        // 한번에 지나간 경우)는 이미 지나간 점검이라 알림 없이 조용히 기록만 한다.
+        seenMap[item.id] = { title: item.title, status: status, endTime: endTime, lastCheckedAt: nowTs };
         continue;
       }
 
-      // 이미 본 글 - 제목이 바뀌었는지 확인(점검 종료/연장은 새 글이 아니라 제목 수정으로 옴)
-      if (prev.title === item.title) continue;
+      // 이미 본 글 - 제목이 그대로면 마지막 확인시각만 갱신하고 넘어간다(알림 없음)
+      if (prev.title === item.title) { prev.lastCheckedAt = nowTs; continue; }
 
-      var wasDone = !!prev.isDone;
-      var nowDone = N.isDoneTitle(item.title);
-      if (!wasDone && nowDone) {
+      // 제목이 바뀜 - 상태가 바뀐 경우와 종료시각만 바뀐 경우(연장)를 구분해서 딱 1번만 알린다
+      if (prev.status !== "점검종료" && status === "점검종료") {
         broadcast(N.roomsWanting("점검"), [
           "\u2705 서버 점검 종료", "", "서버 접속 가능합니다.", "", "즐마하세요 \uD83C\uDF44"
         ].join("\n"));
-      } else {
-        var oldRange = N.extractTimeRange(prev.title);
-        var newRange = N.extractTimeRange(item.title);
-        if (oldRange && newRange && oldRange !== newRange) {
-          broadcast(N.roomsWanting("점검"), [
-            "\u23F0 점검 연장", "", "기존", oldRange, "", "변경", newRange
-          ].join("\n"));
-        }
-        // 그 외의 사소한 제목 수정(오타 정정 등)은 알림 스팸을 막기 위해 조용히 넘어간다
+      } else if (prev.endTime && endTime && prev.endTime !== endTime) {
+        broadcast(N.roomsWanting("점검"), [
+          "\u23F0 점검 연장", "", "기존", prev.endTime, "", "변경", endTime
+        ].join("\n"));
       }
-      seenMap[item.id] = { title: item.title, isDone: nowDone };
+      // 그 외의 사소한 제목 수정(오타 정정 등)은 알림 스팸을 막기 위해 조용히 넘어간다
+      seenMap[item.id] = { title: item.title, status: status, endTime: endTime, lastCheckedAt: nowTs };
     }
   }
 
   /** 이벤트/업데이트는 새 글만 있으면 그대로 알린다(제목 수정 추적 불필요) */
   function processSimpleList(items, seenMap, roomSettingKey, headerLine) {
+    var nowTs = Date.now();
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
-      if (seenMap[item.id]) continue;
+      if (seenMap[item.id]) { seenMap[item.id].lastCheckedAt = nowTs; continue; }
       broadcast(N.roomsWanting(roomSettingKey), [headerLine, "", item.title, "", item.url].join("\n"));
-      seenMap[item.id] = { title: item.title, isDone: false };
+      seenMap[item.id] = { title: item.title, lastCheckedAt: nowTs };
     }
   }
 
   GoombaBot.registerMonitor("공식공지모니터", {
     intervalMs: 5 * 60 * 1000, // 요청하신 "5분" 주기
     check: function () {
+      var nowTs = Date.now();
       var seenNotice = getSeenMap();
       // ⚠️ "seenNotice가 비어있으면 첫 실행"으로 판단했었는데, 공지 목록 조회가 우연히
       // 0건이거나 일시적으로 실패해도 seenNotice가 계속 비어서 매번 "첫 실행"으로
@@ -1958,21 +2234,26 @@ GoombaBot.provider = GoombaBot.provider || {};
       if (isFirstRun) {
         // ⚠️ 봇을 처음 켠 순간 과거 글 전체를 "신규"로 착각해서 방마다 수십 개씩
         // 몰아서 보내면 안 되니, 첫 실행에서는 "본 것"으로만 기록하고 알림은 안 보낸다.
-        for (var i = 0; i < notices.length; i++) seenNotice[notices[i].id] = { title: notices[i].title, isDone: GoombaBot.officialNews.isDoneTitle(notices[i].title) };
+        for (var i = 0; i < notices.length; i++) {
+          seenNotice[notices[i].id] = {
+            title: notices[i].title, status: N.computeStatus(notices[i].title),
+            endTime: N.extractEndTime(notices[i].title), lastCheckedAt: nowTs
+          };
+        }
         saveSeenMap(seenNotice);
 
         var seenEvents = {};
-        for (var e = 0; e < events.length; e++) seenEvents[events[e].id] = { title: events[e].title, isDone: false };
+        for (var e = 0; e < events.length; e++) seenEvents[events[e].id] = { title: events[e].title, lastCheckedAt: nowTs };
         GoombaBot.storage.write("official_events_seen", seenEvents);
 
         var seenUpdates = {};
-        for (var u = 0; u < updates.length; u++) seenUpdates[updates[u].id] = { title: updates[u].title, isDone: false };
+        for (var u = 0; u < updates.length; u++) seenUpdates[updates[u].id] = { title: updates[u].title, lastCheckedAt: nowTs };
         GoombaBot.storage.write("official_updates_seen", seenUpdates);
         GoombaBot.storage.write("official_news_initialized", true);
         return null;
       }
 
-      processNoticeList(notices, seenNotice);
+      processNoticeList(notices, seenNotice, nowTs);
       saveSeenMap(seenNotice);
 
       var seenEvents2 = GoombaBot.storage.readStale("official_events_seen") || {};
@@ -1991,7 +2272,7 @@ GoombaBot.provider = GoombaBot.provider || {};
 
 module.exports = { GoombaBot: GoombaBot };
 
-},{"../core/api.js":11,"../core/config.js":13,"../core/format.js":14,"../core/router.js":15}],9:[function(require,module,exports){
+},{"../core/api.js":12,"../core/config.js":14,"../core/format.js":15,"../core/router.js":16}],9:[function(require,module,exports){
 
 /**
  * commands/resistance.js
@@ -2287,7 +2568,321 @@ require("../core/router.js");
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"../core/config.js":13,"../core/format.js":14,"../core/router.js":15}],10:[function(require,module,exports){
+},{"../core/config.js":14,"../core/format.js":15,"../core/router.js":16}],10:[function(require,module,exports){
+
+/**
+ * commands/scroll.js
+ * ---------------------
+ * 생활 스크롤 정보 조회(!스크롤)를 담당한다. 기존 명령어/모듈은 전혀 건드리지
+ * 않는 완전히 새로운 파일 - src/data/scroll-quests.json(엑셀 스크롤퀘스트_v5
+ * 시트를 그대로 옮긴 데이터)을 읽어서 서비스(GoombaBot.provider.*)를 만들고,
+ * 그 위에 !스크롤 명령어를 붙인다.
+ *
+ * ⚠️ 데이터 출처: 사용자가 준 "생활스크롤v5의 사본.xlsx"의 스크롤퀘스트_v5 시트.
+ * 실제 수식을 열어서 확인한 확정 규칙:
+ *   - 제작물 수 = 스크롤 개수 × 2 (PRODUCTS_PER_SCROLL 상수로 관리 - 하드코딩 금지)
+ *   - expPerScroll은 "스크롤 1개 완료시 얻는 경험치"(스크롤 개수와 무관하게 고정값)
+ *   - materials의 qty는 "그 레시피(원본 scrollCount개 배치) 전체에 드는 재료
+ *     총량"으로 해석함(스크롤 1개당 아님) - 그래서 수량 계산시 비례식(qty÷scrollCount
+ *     ×원하는개수)으로 계산하고, 정수로 딱 안 떨어지면 올림(ceil)해서 "최소 이만큼은
+ *     있어야 한다" 기준으로 보여준다. ⚠️ 이 해석이 실제 게임 제작 방식과 맞는지는
+ *     확인이 필요함(사용자에게 결과보고서에서 별도 확인 요청) - 배치 단위로만 제작
+ *     가능한 시스템이라면 계산 방식 자체를 다시 설계해야 할 수 있다.
+ *   - 경험치 보너스(수정주의 시트의 1.33배)는 의미가 아직 불확실해서 1차에서는
+ *     전혀 사용하지 않는다(expPerScroll 그대로만 사용).
+ */
+
+var GoombaBot = require("../core/config.js").GoombaBot;
+require("../core/format.js");
+require("../core/router.js");
+
+var SCROLL_QUESTS = require("../data/scroll-quests.json");
+
+GoombaBot.provider = GoombaBot.provider || {};
+
+(function () {
+  // ⚠️ 스크롤 1개당 제작물 개수 - 지금까지 확인된 데이터(12건) 전부 "스크롤수×2"라서
+  // 상수로 뺐다. 나중에 게임 업데이트로 배율이 바뀌면 이 숫자 하나만 고치면 된다.
+  var PRODUCTS_PER_SCROLL = 2;
+
+  // ---- 스킬 목록(데이터에 실제로 등장하는 스킬만, 등장 순서 그대로) ----
+  // 스킬이 늘어나도 이 배열이 아니라 scroll-quests.json에 항목만 추가하면 자동 반영된다.
+  var SKILL_ORDER = [];
+  (function collectSkills() {
+    var seen = {};
+    for (var i = 0; i < SCROLL_QUESTS.length; i++) {
+      var skill = SCROLL_QUESTS[i].skill;
+      if (!seen[skill]) { seen[skill] = true; SKILL_ORDER.push(skill); }
+    }
+  })();
+
+  // ---- 재료 목록(유니크, 등장 순서 그대로) - 재료 역검색/오검색 방지용 ----
+  var MATERIAL_NAMES = [];
+  (function collectMaterials() {
+    var seen = {};
+    for (var i = 0; i < SCROLL_QUESTS.length; i++) {
+      var mats = SCROLL_QUESTS[i].materials;
+      for (var j = 0; j < mats.length; j++) {
+        if (!seen[mats[j].name]) { seen[mats[j].name] = true; MATERIAL_NAMES.push(mats[j].name); }
+      }
+    }
+  })();
+
+  function getSkills() { return SKILL_ORDER.slice(); }
+
+  function isKnownSkill(name) {
+    for (var i = 0; i < SKILL_ORDER.length; i++) { if (SKILL_ORDER[i] === name) return true; }
+    return false;
+  }
+
+  function getItemsBySkill(skill) {
+    var result = [];
+    for (var i = 0; i < SCROLL_QUESTS.length; i++) {
+      if (SCROLL_QUESTS[i].skill === skill) result.push(SCROLL_QUESTS[i]);
+    }
+    return result;
+  }
+
+  /** 아이템 이름 검색 - 기존 !룬 등과 동일한 fuzzyFilter(정확일치→부분일치→초성→오타허용)를
+   * 그대로 재사용한다(대소문자/공백 등은 fuzzyFilter 내부의 normalize가 처리). 스킬을
+   * 지정했으면 그 스킬 안에서만, 안 하면 전체 12개 중에서 찾는다("스킬명 생략 단축"용). */
+  function searchItems(keyword, withinSkill) {
+    var pool = withinSkill ? getItemsBySkill(withinSkill) : SCROLL_QUESTS;
+    return GoombaBot.search.fuzzyFilter(pool, keyword, function (q) { return q.item; });
+  }
+
+  /**
+   * 재료 역검색 - "가죽"으로 검색해도 "가죽+"와 "상급 가죽"을 서로 다른 재료로 정확히
+   * 구분해서 보여줘야 한다(요청 반영). 그래서 문자열 포함 여부로 스크롤을 직접 뒤지는
+   * 대신, 먼저 "실제로 존재하는 재료명 목록"에서 fuzzyFilter로 몇 개나 매칭되는지부터
+   * 찾고, 매칭된 각각의 "정확한 재료명"별로 결과를 나눠서 돌려준다 - 결과에 항상
+   * 실제 매칭된 재료명이 명시되므로 사용자가 뭐가 검색됐는지 헷갈릴 일이 없다.
+   */
+  function findScrollsByMaterialKeyword(keyword) {
+    var matchedNames = GoombaBot.search.fuzzyFilter(MATERIAL_NAMES, keyword, function (n) { return n; });
+    var groups = [];
+    for (var i = 0; i < matchedNames.length; i++) {
+      var materialName = matchedNames[i];
+      var scrolls = [];
+      for (var j = 0; j < SCROLL_QUESTS.length; j++) {
+        var quest = SCROLL_QUESTS[j];
+        for (var k = 0; k < quest.materials.length; k++) {
+          if (quest.materials[k].name === materialName) {
+            scrolls.push({ quest: quest, qty: quest.materials[k].qty });
+            break;
+          }
+        }
+      }
+      groups.push({ materialName: materialName, scrolls: scrolls });
+    }
+    return groups;
+  }
+
+  /** 스크롤 count개를 만들 때의 제작물/경험치/재료를 계산한다. 재료는 원본 레시피가
+   * "scrollCount개 배치당 qty개"라는 비율로 보고 비례식으로 계산 후 올림한다. */
+  function calcForCount(quest, count) {
+    var products = count * PRODUCTS_PER_SCROLL;
+    var exp = count * quest.expPerScroll;
+    var materials = [];
+    for (var i = 0; i < quest.materials.length; i++) {
+      var m = quest.materials[i];
+      var exact = (m.qty / quest.scrollCount) * count;
+      materials.push({ name: m.name, qty: Math.ceil(exact), exact: exact });
+    }
+    return { products: products, exp: exp, materials: materials };
+  }
+
+  GoombaBot.provider.getScrollSkills = getSkills;
+  GoombaBot.provider.isKnownScrollSkill = isKnownSkill;
+  GoombaBot.provider.getScrollItemsBySkill = getItemsBySkill;
+  GoombaBot.provider.searchScrollItems = searchItems;
+  GoombaBot.provider.findScrollsByMaterialKeyword = findScrollsByMaterialKeyword;
+  GoombaBot.provider.calcScrollForCount = calcForCount;
+  GoombaBot.provider.SCROLL_PRODUCTS_PER_SCROLL = PRODUCTS_PER_SCROLL;
+})();
+
+(function () {
+  var F = GoombaBot.format;
+  var P = GoombaBot.provider;
+
+  var SKILL_ICON = { "대장": "\u2692", "목공": "\uD83D\uDD28", "매직": "\uD83D\uDD2E", "중갑": "\uD83D\uDEE1", "경갑": "\uD83D\uDC55", "천옷": "\uD83E\uDDF5" };
+  function skillIcon(skill) { return SKILL_ICON[skill] || "\uD83D\uDCDC"; }
+
+  function formatMaterialsInline(materials) {
+    var parts = [];
+    for (var i = 0; i < materials.length; i++) parts.push(materials[i].name + " \u00D7 " + materials[i].qty);
+    return parts.join(", ");
+  }
+
+  // ---- 화면 1: 메뉴 ----
+  function replyMenu(chat) {
+    var skills = P.getScrollSkills();
+    var lines = [];
+    for (var i = 0; i < skills.length; i++) lines.push(skillIcon(skills[i]) + " " + skills[i]);
+    lines.push("");
+    lines.push("사용법");
+    lines.push("!스크롤 대장");
+    lines.push("!스크롤 대장 크레센트 10");
+    lines.push("!스크롤 재료 가죽");
+    chat.reply(F.box("\uD83D\uDCDC 생활 스크롤", lines));
+  }
+
+  // ---- 화면 2: 스킬별 아이템 목록 ----
+  function replySkillList(chat, skill) {
+    var items = P.getScrollItemsBySkill(skill);
+    var lines = [];
+    for (var i = 0; i < items.length; i++) lines.push(F.circled(i + 1) + " " + items[i].item + " \u00B7 " + items[i].shop);
+    lines.push("");
+    lines.push("!\uC2A4\uD06C\uB864 " + skill + " [\uC544\uC774\uD15C\uBA85]\uC73C\uB85C \uC0C1\uC138 \uD655\uC778");
+    chat.reply(F.box(skillIcon(skill) + " " + skill + " \uC0DD\uD65C \uC2A4\uD06C\uB864", lines));
+  }
+
+  // ---- 화면 3: 아이템 상세(수량 미지정) ----
+  function replyItemDetail(chat, quest) {
+    var lines = [
+      "\uD83D\uDCCD " + quest.shop,
+      "",
+      F.field("\uC2A4\uD06C\uB864", quest.scrollCount + "\uAC1C"),
+      F.field("\uC81C\uC791\uBB3C", (quest.scrollCount * P.SCROLL_PRODUCTS_PER_SCROLL) + "\uAC1C"),
+      F.field("\uACBD\uD5D8\uCE58(\uC2A4\uD06C\uB864 1\uAC1C)", String(quest.expPerScroll)),
+      F.field("\uC7AC\uB8CC(" + quest.scrollCount + "\uAC1C \uAE30\uC900)", formatMaterialsInline(quest.materials)),
+      "",
+      "!\uC2A4\uD06C\uB864 " + quest.skill + " " + quest.item + " [\uC218\uB7C9]\uC73C\uB85C \uACC4\uC0B0 \uAC00\uB2A5"
+    ];
+    chat.reply(F.box(skillIcon(quest.skill) + " " + quest.item, lines));
+  }
+
+  // ---- 화면 4: 수량 계산 ----
+  function replyItemCalc(chat, quest, count) {
+    var calc = P.calcScrollForCount(quest, count);
+    var lines = ["\uD83D\uDCCD " + quest.shop, ""];
+    lines.push(F.field("\uC81C\uC791\uBB3C", calc.products + "\uAC1C"));
+    lines.push(F.field("\uACBD\uD5D8\uCE58", GoombaBot.format.number(calc.exp)));
+    lines.push("");
+    lines.push("\uC7AC\uB8CC");
+    for (var i = 0; i < calc.materials.length; i++) lines.push("\u2022 " + calc.materials[i].name + " \u00D7 " + calc.materials[i].qty);
+    lines.push("");
+    lines.push("\u26A0\uFE0F \uC6D0\uBCF8 \uB808\uC2DC\uD53C(\uC2A4\uD06C\uB864 " + quest.scrollCount + "\uAC1C \uAE30\uC900) \uBE44\uC728\uB85C \uACC4\uC0B0\uD574 \uC62C\uB9BC\uD55C \uAC12\uC785\uB2C8\uB2E4");
+    chat.reply(F.box(skillIcon(quest.skill) + " " + quest.item + " (" + count + "\uAC1C \uAE30\uC900)", lines));
+  }
+
+  // ---- 화면 5: 아이템 검색 결과가 여러 개일 때(선택 목록) ----
+  function replyItemChoices(chat, results, skillContext) {
+    var lines = [];
+    for (var i = 0; i < results.length; i++) {
+      lines.push(F.circled(i + 1) + " " + results[i].item + " \u00B7 " + results[i].shop + " (" + results[i].skill + ")");
+    }
+    lines.push("");
+    lines.push("\uC544\uC774\uD15C\uBA85\uC744 \uB354 \uAD6C\uCCB4\uC801\uC73C\uB85C \uC785\uB825\uD574\uC8FC\uC138\uC694");
+    chat.reply(F.box("\uD83D\uDD0E \uAC80\uC0C9 \uACB0\uACFC (" + results.length + "\uAC1C)", lines));
+  }
+
+  // ---- 화면 6: 재료 역검색 ----
+  function replyMaterialSearch(chat, groups) {
+    if (groups.length === 0) { chat.reply(F.emoji.error + " \uD574\uB2F9 \uC7AC\uB8CC\uB97C \uC4F0\uB294 \uC0DD\uD65C \uC2A4\uD06C\uB864\uC774 \uC5C6\uC2B5\uB2C8\uB2E4."); return; }
+    var lines = [];
+    for (var g = 0; g < groups.length; g++) {
+      var group = groups[g];
+      if (g > 0) lines.push("");
+      lines.push("\uD83D\uDD29 " + group.materialName);
+      for (var i = 0; i < group.scrolls.length; i++) {
+        var s = group.scrolls[i];
+        lines.push(skillIcon(s.quest.skill) + " " + s.quest.item + "(" + s.quest.shop + ") \u00B7 " + s.qty + "\uAC1C");
+      }
+    }
+    lines.push("");
+    lines.push("\uC6D0\uBCF8 \uB808\uC2DC\uD53C \uAE30\uC900 \uD544\uC694\uB7C9\uC785\uB2C8\uB2E4");
+    chat.reply(F.box("\uD83D\uDD0D \uC7AC\uB8CC \uAC80\uC0C9", lines));
+  }
+
+  // ---- !스크롤 ----
+  GoombaBot.registerCommand("스크롤", {
+    category: "정보", summary: "생활 스크롤 정보 조회(구매처/재료/수량 계산)", usage: ["!스크롤", "!스크롤 대장", "!스크롤 대장 크레센트 10", "!스크롤 재료 가죽"],
+    detail: {
+      title: "\uD83D\uDCDC \uC0DD\uD65C \uC2A4\uD06C\uB864", examples: ["!스크롤 대장", "!스크롤 대장 크레센트 10", "!스크롤 재료 가죽"],
+      features: [
+        "!스크롤만 치면 스킬 목록이 나옵니다(대장/목공/매직/중갑/경갑/천옷)",
+        "!스크롤 대장처럼 스킬명을 넣으면 그 스킬의 스크롤 아이템 목록이 나옵니다",
+        "!스크롤 대장 크레센트처럼 아이템명(부분검색 가능)을 더하면 상세 정보가 나옵니다. 스킬명은 !스크롤 크레센트처럼 생략해도 됩니다",
+        "!스크롤 대장 크레센트 10처럼 수량을 더하면 그 수량 기준 제작물/경험치/재료를 계산합니다",
+        "!스크롤 재료 가죽처럼 재료명(부분검색 가능)을 검색하면 그 재료를 쓰는 스크롤을 전부 보여줍니다"
+      ]
+    },
+    execute: function (chat) {
+      var args = chat.args;
+
+      // 인자 없음 -> 메뉴
+      if (args.length === 0) { replyMenu(chat); return; }
+
+      // "!스크롤 재료 [키워드]" - 예약어라 스킬/아이템명보다 먼저 확인
+      if (String(args[0]) === "\uC7AC\uB8CC") {
+        var materialKeyword = args.slice(1).join(" ").trim();
+        if (!materialKeyword) { chat.reply(F.usageBlock(["!스크롤 재료 가죽"])); return; }
+        replyMaterialSearch(chat, P.findScrollsByMaterialKeyword(materialKeyword));
+        return;
+      }
+
+      // 마지막 토큰이 순수 숫자면 수량으로 뗀다(나머지는 스킬/아이템 검색어)
+      var tokens = [];
+      for (var t = 0; t < args.length; t++) tokens.push(String(args[t]));
+      var count = null;
+      if (tokens.length > 1 && /^\d+$/.test(tokens[tokens.length - 1])) {
+        count = parseInt(tokens.pop(), 10);
+        if (count <= 0) count = null;
+      }
+
+      // 남은 토큰 중 첫 번째가 "알려진 스킬명"과 정확히 일치하면 스킬 지정으로 본다
+      var skillContext = null;
+      var searchTokens = tokens;
+      if (tokens.length > 0 && P.isKnownScrollSkill(tokens[0])) {
+        skillContext = tokens[0];
+        searchTokens = tokens.slice(1);
+      }
+
+      // 스킬만 있고 아이템명이 없으면 -> 그 스킬의 아이템 목록
+      if (skillContext && searchTokens.length === 0) {
+        if (count !== null) {
+          // "!스크롤 대장 10"처럼 아이템명 없이 수량만 온 경우 - 1차에서 지원 안 하는
+          // 형태(요청 반영) - 에러 대신 목록을 다시 보여주면서 자연스럽게 안내한다.
+          chat.reply(F.emoji.warn + " \uC5B4\uB5A4 \uC544\uC774\uD15C\uC778\uC9C0 \uBA3C\uC800 \uACE8\uB77C\uC8FC\uC138\uC694.\n\n" + skillIcon(skillContext) + " " + skillContext + " \uC544\uC774\uD15C \uBAA9\uB85D");
+          replySkillList(chat, skillContext);
+          return;
+        }
+        replySkillList(chat, skillContext);
+        return;
+      }
+
+      // 아이템명 검색어가 있으면(스킬 지정 여부 무관) 검색
+      var keyword = searchTokens.join(" ").trim();
+      if (!keyword) {
+        // 스킬명도 아니고 아이템 검색어도 없음(예: 순수 숫자만 입력) - 메뉴로 안내
+        chat.reply(F.emoji.warn + " \uC0AC\uC6A9\uBC95\uC744 \uD655\uC778\uD574\uC8FC\uC138\uC694.");
+        replyMenu(chat);
+        return;
+      }
+
+      var results = P.searchScrollItems(keyword, skillContext);
+      if (results.length === 0) {
+        chat.reply(F.emoji.error + " '" + keyword + "' \uAC80\uC0C9 \uACB0\uACFC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+        return;
+      }
+      if (results.length > 1) {
+        // ⚠️ 요청 반영 - 여러 개 매칭되면 임의로 하나 고르지 않고 번호 목록을 보여주고
+        // 사용자가 다시 구체적으로 입력하게 한다(지금 12개 데이터에선 거의 안 나오지만,
+        // 나중에 이름이 비슷한 아이템이 추가돼도 안전하게 동작하도록).
+        replyItemChoices(chat, results, skillContext);
+        return;
+      }
+
+      var quest = results[0];
+      if (count !== null) { replyItemCalc(chat, quest, count); } else { replyItemDetail(chat, quest); }
+    }
+  });
+})();
+
+module.exports = { GoombaBot: GoombaBot };
+
+},{"../core/config.js":14,"../core/format.js":15,"../core/router.js":16,"../data/scroll-quests.json":23}],11:[function(require,module,exports){
 
 /**
  * commands/search.js
@@ -3103,7 +3698,7 @@ module.exports = { GoombaBot: GoombaBot };
 
 
 
-},{"../core/api.js":11,"../core/config.js":13,"../core/format.js":14,"../core/router.js":15}],11:[function(require,module,exports){
+},{"../core/api.js":12,"../core/config.js":14,"../core/format.js":15,"../core/router.js":16}],12:[function(require,module,exports){
 
 /**
  * core/api.js
@@ -3309,7 +3904,12 @@ GoombaBot.http = (function () {
     var arr = GoombaBot.http.toArray(parsed);
     var firstItemKeys = (arr.length > 0 && arr[0] && typeof arr[0] === "object") ? Object.keys(arr[0]) : null;
 
-    return { ok: true, stage: "done", url: url, topType: topType, topKeys: topKeys, arrayCount: arr.length, firstItemKeys: firstItemKeys };
+    // ⚠️ Worker가 진단용으로 응답에 "_debug" 필드를 실어주는 경우(예: 공식 공지/이벤트/
+    // 업데이트 파싱) 그대로 같이 넘겨준다 - items가 0건일 때 실제 받아온 HTML이 어떻게
+    // 생겼는지(길이/앞뒤 미리보기/리다이렉트 여부)를 !진단에서 바로 볼 수 있게.
+    var debugInfo = (parsed && typeof parsed === "object" && parsed._debug) ? parsed._debug : null;
+
+    return { ok: true, stage: "done", url: url, topType: topType, topKeys: topKeys, arrayCount: arr.length, firstItemKeys: firstItemKeys, debugInfo: debugInfo };
   }
 
   /**
@@ -3414,7 +4014,70 @@ GoombaBot.http = (function () {
     return result;
   }
 
-  return { getJson: getJson, getJsonFromUrl: getJsonFromUrl, getRawText: getRawText, inspect: inspect, base64Decode: base64Decode, callCounts: callCounts };
+  /**
+   * ⚠️ 공식공지/이벤트/업데이트(officialnews.js) 전용 - Worker가 base64로 감싼
+   * 응답({b64:"..."})을 풀어서 inspect()와 똑같은 형태로 돌려준다. jsoup이 순수
+   * 텍스트를 오염시키는 문제를 base64로 우회한 것이라, 진단할 때도 똑같이 풀어야
+   * 실제 내용을 볼 수 있다.
+   */
+  function inspectBase64Wrapped(path, timeoutMs) {
+    var url = String(GoombaBotConfig.apiBase) + String(path);
+    var requestOption = { url: String(url), method: "GET", timeout: timeoutMs || DEFAULT_TIMEOUT_MS, headers: mergeHeaders(null) };
+
+    var doc;
+    try {
+      recordCall(url);
+      doc = Http.requestSync(requestOption);
+    } catch (requestError) {
+      return { ok: false, stage: "request", url: url, statusCode: extractStatusCode(requestError), error: describeError(requestError) };
+    }
+
+    var extracted;
+    try {
+      extracted = extractBodyText(doc);
+    } catch (extractError) {
+      return { ok: false, stage: "extract", url: url, error: describeError(extractError) };
+    }
+
+    var outer;
+    try {
+      outer = JSON.parse(extracted.text);
+    } catch (parseError) {
+      var fullText = extracted.text ? String(extracted.text) : "";
+      return {
+        ok: false, stage: "parse(outer/b64래퍼)", url: url, error: describeError(parseError),
+        bodyLength: fullText.length,
+        bodyHead: fullText ? fullText.substring(0, 200) : "(빈 응답)",
+        bodyTail: fullText.length > 200 ? fullText.substring(Math.max(0, fullText.length - 200)) : ""
+      };
+    }
+
+    if (!outer || typeof outer.b64 !== "string") {
+      return { ok: false, stage: "b64필드없음", url: url, error: "응답에 b64 필드가 없습니다(래핑 형식이 예상과 다름)" };
+    }
+
+    var parsed;
+    try {
+      var decodedText = GoombaBot.http.base64Decode(outer.b64);
+      parsed = JSON.parse(decodedText);
+    } catch (decodeError) {
+      return { ok: false, stage: "parse(디코딩후)", url: url, error: describeError(decodeError) };
+    }
+
+    var topType = Object.prototype.toString.call(parsed) === "[object Array]" ? "array" : (typeof parsed === "object" ? "object" : typeof parsed);
+    var topKeys = topType === "object" ? Object.keys(parsed) : null;
+    var arr = GoombaBot.http.toArray(parsed);
+    var firstItemKeys = (arr.length > 0 && arr[0] && typeof arr[0] === "object") ? Object.keys(arr[0]) : null;
+    var firstItemTitle = (arr.length > 0 && arr[0] && arr[0].title) ? String(arr[0].title) : null;
+    var debugInfo = (parsed && typeof parsed === "object" && parsed._debug) ? parsed._debug : null;
+
+    return {
+      ok: true, stage: "done", url: url, topType: topType, topKeys: topKeys, arrayCount: arr.length,
+      firstItemKeys: firstItemKeys, firstItemTitle: firstItemTitle, debugInfo: debugInfo
+    };
+  }
+
+  return { getJson: getJson, getJsonFromUrl: getJsonFromUrl, getRawText: getRawText, inspect: inspect, inspectBase64Wrapped: inspectBase64Wrapped, base64Decode: base64Decode, callCounts: callCounts };
 })();
 
 // ---- API 응답 파싱 공통 헬퍼 (commands/*.js가 공용으로 씀) ----
@@ -3493,19 +4156,24 @@ GoombaBot.http.fetchCached = function (cacheKey, ttlMs, path, preferredKey, fetc
 GoombaBot.http.memoize = function (fn, ttlMs) {
   var cache = null;
   var cachedAt = 0;
-  return function () {
+  var wrapped = function () {
     var now = Date.now();
     if (cache !== null && (now - cachedAt) < ttlMs) return cache;
     cache = fn();
     cachedAt = now;
     return cache;
   };
+  // ⚠️ "!시세 새로고침" 같은 수동 강제 갱신용 - 메모리 캐시를 비워서 다음 호출 때
+  // 무조건 fn()을 다시 실행하게 만든다. 기존 memoize(fn, ttl)() 호출부는 전혀
+  // 안 바뀌고(그냥 함수 호출), 이 메서드를 쓰는 곳에서만 추가로 활용한다.
+  wrapped.reset = function () { cache = null; cachedAt = 0; };
+  return wrapped;
 };
 
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"./cache.js":12,"./config.js":13}],12:[function(require,module,exports){
+},{"./cache.js":13,"./config.js":14}],13:[function(require,module,exports){
 
 /**
  * core/cache.js
@@ -3559,7 +4227,7 @@ GoombaBot.storage = (function () {
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"./config.js":13}],13:[function(require,module,exports){
+},{"./config.js":14}],14:[function(require,module,exports){
 
 /**
  * core/config.js
@@ -3580,7 +4248,7 @@ var GoombaBotConfig = {
 
   // ⚠️ 매 빌드마다 Claude가 이 값을 새로 바꾼다 - "!버전"으로 확인해서, 실제
   // GitHub에 올라간 코드가 지금 이야기 중인 최신 코드가 맞는지 확실히 구분하기 위함.
-  buildVersion: "2026-07-27-15",
+  buildVersion: "2026-07-27-32",
 
   // ⚠️ 사용자가 확인한 API들이 전부 "/d/api/v1/..." 형태라, 이전 프로젝트에서 확인된
   // mabimobi.life와 같은 사이트로 보고 이 베이스 URL을 사용합니다. 다르다면 이 값만 고치면
@@ -3608,15 +4276,15 @@ var GoombaBotConfig = {
     worldChatRecent: "/world-chat/recent",
     // ⚠️ 신규 - mabimobi.life가 아니라 마비노기 모바일 "공식" 홈페이지(Nexon 운영)를
     // Worker가 대신 파싱해서 돌려주는 경로. 이 3개만 다른 사이트로 간다.
-    officialNotice: "/mabimobile-notice",
-    officialEvents: "/mabimobile-events",
-    officialUpdate: "/mabimobile-update"
+    officialNotice: "/nexon-official-notice",
+    officialEvents: "/nexon-official-events",
+    officialUpdate: "/nexon-official-update"
   },
 
   cacheTtlMs: {
     default: 30 * 60 * 1000, // 30분 - 대부분의 도감류 데이터
     notice: 10 * 60 * 1000, // 10분
-    market: 30 * 60 * 1000 // 30분
+    market: 15 * 60 * 1000 // 15분(기존 30분 - 새 품목 반영이 너무 느리다는 요청으로 단축)
   },
 
   // ⚠️ 메신저봇R(API2)은 고유 ID가 아니라 표시 닉네임 문자열로만 사람을 구분합니다.
@@ -3657,7 +4325,7 @@ module.exports = {
 };
 
 
-},{}],14:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 
 /**
  * core/format.js
@@ -4284,7 +4952,7 @@ GoombaBot.isAdmin = function (senderName) {
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"./config.js":13}],15:[function(require,module,exports){
+},{"./config.js":14}],16:[function(require,module,exports){
 
 /**
  * core/router.js
@@ -4493,7 +5161,7 @@ GoombaBot.dispatchCommand = function (chat) {
 module.exports = { GoombaBot: GoombaBot };
 
 
-},{"./cache.js":12,"./config.js":13,"./format.js":14}],16:[function(require,module,exports){
+},{"./cache.js":13,"./config.js":14,"./format.js":15}],17:[function(require,module,exports){
 module.exports={
   "기사": [
     "강타",
@@ -4615,7 +5283,7 @@ module.exports={
     "보조"
   ]
 }
-},{}],17:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 module.exports={
   "화법": "화염술사",
   "불법": "화염술사",
@@ -4631,7 +5299,7 @@ module.exports={
   "법사": "마법사",
   "검술": "검술사"
 }
-},{}],18:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 module.exports={
   "화염술사": [
     "A: 421 31115 / 3단계 진입 시 113 15 123 5113 13 / 1415 125 1115",
@@ -4656,7 +5324,7 @@ module.exports={
     "그래도 콜이 부족하면: 1425"
   ]
 }
-},{}],19:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 module.exports={
   "화염술사": [
     "치강/치연/치추중 자유영역(엠블 위대함=치강펫, 해방=치연펫, 영원한밤=치추중 자유영역이 더 좋음)"
@@ -4678,7 +5346,7 @@ module.exports={
     "진돼지 (고유스킬% 최대 초진용, 기갱용)"
   ]
 }
-},{}],20:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 module.exports={
   "화염술사": [
     "스킬위력 4천 후반대",
@@ -4737,1002 +5405,1640 @@ module.exports={
     "추가타 3순위"
   ]
 }
-},{}],21:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
 module.exports={
-  "전사": {
-    "무기": [
-      "바위 칼날",
-      "죽음",
-      "타오르는 영광",
-      "오랜 광기",
-      "대군주+",
-      "광채+",
-      "거대한 분노",
-      "창백한 기수",
-      "계시+",
-      "두 갈래 뿔"
+  "기사": {
+    "태그": [
+      "확정",
+      "빠른 스킬"
     ],
-    "엠블럼": [
-      "빛바랜 별",
-      "영원한 밤",
-      "위대함",
-      "초월",
-      "침묵",
-      "태초",
-      "고결함",
-      "해방",
-      "백금 천칭"
-    ],
-    "장신구": [
-      "붕괴+",
-      "돌격+",
-      "극점+",
-      "검투사+",
-      "맹공+",
-      "패기+",
-      "참격+",
-      "돌진+",
-      "포효+"
-    ],
-    "방어구": [
-      "기본기+",
-      "서광",
-      "칼바람",
-      "위엄",
-      "등대지기",
-      "녹슨 방패",
-      "용 사냥꾼",
-      "사슬로 묶은 법전",
-      "기사단장",
-      "별바라기"
+    "장신구": {
+      "60%": [
+        "돌파",
+        "지진",
+        "용기"
+      ],
+      "10%": [
+        "명예",
+        "격돌"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "무너진 경계",
+        "흐릿한 형상"
+      ],
+      "그외": [
+        "열의",
+        "서광",
+        "승전",
+        "위엄",
+        "기사단장",
+        "등대지기"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "눈부신 잔영"
+      ],
+      "대체": [
+        "두 갈래 뿔"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "백금 천칭"
+      ],
+      "비고": "영원한 밤 · 1.4p 차 동급"
+    },
+    "제보": [
+      {
+        "조합": "돌파 지진 용기",
+        "개조": "135",
+        "세공": [
+          "강타",
+          "보조",
+          "생존",
+          "연타",
+          "소환"
+        ],
+        "비고": ""
+      }
     ]
   },
   "대검전사": {
-    "무기": [
-      "거대한 분노",
-      "오랜 광기",
-      "광채+",
-      "암운+",
-      "죽음",
-      "창백한 기수",
-      "추적자",
-      "불꽃으로 새긴 문장",
-      "억눌린 충동",
-      "햇살+"
+    "태그": [
+      "유력",
+      "강타 강화"
     ],
-    "엠블럼": [
-      "위대함",
-      "빛바랜 별",
-      "영원한 밤",
-      "초월",
-      "고결함",
-      "해방",
-      "백금 천칭",
-      "침묵",
-      "태초"
+    "장신구": {
+      "60%": [
+        "탄력",
+        "광전사"
+      ],
+      "30%": [
+        "절단▲"
+      ],
+      "10%": [
+        "봉쇄",
+        "반격",
+        "분노"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약"
+      ],
+      "침식": [
+        "무너진 경계",
+        "금 간 봉인",
+        "흐릿한 형상"
+      ],
+      "그외": [
+        "봉인술사",
+        "끊는 피",
+        "계승자",
+        "등대지기",
+        "녹슨 방패"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "거대한 분노"
+      ],
+      "대체": [
+        "암운/실전 픽",
+        "오랜 광기"
+      ],
+      "비고": "1픽 교체"
+    },
+    "엠블럼": {
+      "주력": [
+        "위대함"
+      ]
+    },
+    "참고": "기본기 25% 잔존 공존 지표",
+    "제보": [
+      {
+        "조합": "탄력 광전사 절단",
+        "개조": "456",
+        "세공": [
+          "강타",
+          "보조",
+          "강타쿨",
+          "보조쿨"
+        ],
+        "비고": "주류 픽"
+      }
+    ]
+  },
+  "전사": {
+    "태그": [
+      "분기",
+      "스킬 위력"
     ],
-    "장신구": [
-      "탄력+",
-      "광전사+",
-      "봉쇄+",
-      "반격+",
-      "분노+",
-      "절단+",
-      "무자비+",
-      "회심+",
-      "회전+"
-    ],
-    "방어구": [
-      "기본기+",
-      "흐릿한 형상",
-      "녹슨 방패",
-      "금 간 봉인",
-      "무너진 경계",
-      "봉인술사",
-      "끓는 피",
-      "등대지기",
-      "승전"
+    "장신구": {
+      "60%": [
+        "붕괴",
+        "돌격▲"
+      ],
+      "30%": [
+        "검투사▲",
+        "패기"
+      ],
+      "10%": [
+        "극점",
+        "맹공"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "무너진 경계",
+        "흐릿한 형상"
+      ],
+      "그외": [
+        "칼바람",
+        "위엄",
+        "서광",
+        "등대지기",
+        "아귀",
+        "승전"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "타오르는 영광"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "위대함"
+      ],
+      "비고": "1픽 교체"
+    },
+    "제보": [
+      {
+        "조합": "붕괴 돌격 검투사",
+        "개조": "246",
+        "세공": [
+          "강타",
+          "방해",
+          "이동",
+          "생존"
+        ],
+        "비고": ""
+      },
+      {
+        "조합": "붕괴 돌격 패기",
+        "개조": null,
+        "세공": null,
+        "비고": ""
+      }
     ]
   },
   "검술사": {
-    "무기": [
-      "바위 칼날",
-      "눈부신 잔영",
-      "거대한 분노",
-      "타오르는 영광",
-      "대군주+",
-      "죽음",
-      "계시+",
-      "햇살+",
-      "창백한 기수",
-      "광채+"
+    "태그": [
+      "확정",
+      "연타 강화"
     ],
-    "엠블럼": [
-      "해방",
-      "위대함",
-      "영원한 밤",
-      "빛바랜 별",
-      "초월",
-      "태초",
-      "고결함",
-      "백금 천칭",
-      "침묵"
-    ],
-    "장신구": [
-      "관통+",
-      "평정+",
-      "일섬+",
-      "낙화+",
-      "중검+",
-      "무희+",
-      "맹렬+",
-      "압박+",
-      "피바람+"
-    ],
-    "방어구": [
-      "승전",
-      "교차하는 사슬",
-      "별바라기",
-      "아귀",
-      "잠들지 않는 불",
-      "금 간 봉인",
-      "숲 길잡이",
-      "녹슨 방패",
-      "사슬로 묶은 법전",
-      "잠든 땅"
-    ]
-  },
-  "기사": {
-    "무기": [
-      "눈부신 잔영",
-      "두 갈래 뿔",
-      "죽음",
-      "부패+",
-      "타오르는 영광",
-      "억눌린 충동",
-      "거대한 분노",
-      "바위 칼날",
-      "광채+",
-      "창백한 기수"
-    ],
-    "엠블럼": [
-      "백금 천칭",
-      "영원한 밤",
-      "초월",
-      "빛바랜 별",
-      "위대함",
-      "고결함",
-      "태초",
-      "침묵",
-      "해방"
-    ],
-    "장신구": [
-      "지진+",
-      "돌파+",
-      "용기+",
-      "명예+",
-      "격돌+",
-      "맹약+",
-      "고갈+",
-      "결의+"
-    ],
-    "방어구": [
-      "열의+",
-      "첫 번째 서약",
-      "승전",
-      "서광",
-      "금 간 봉인",
-      "숲 길잡이",
-      "뼈 인장",
-      "사슬로 묶은 법전",
-      "위엄"
+    "장신구": {
+      "60%": [
+        "관통",
+        "평정",
+        "일섬"
+      ],
+      "10%": [
+        "중검"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "교차하는 사슬",
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기",
+        "잠들지 않는 불"
+      ],
+      "침식": [
+        "무너진 경계",
+        "잿빛 장막",
+        "금 간 봉인",
+        "흐릿한 형상"
+      ],
+      "그외": [
+        "아귀",
+        "승전",
+        "계승자",
+        "수호자"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "눈부신 잔영"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "해방"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "관통 평정 일섬",
+        "개조": "456",
+        "세공": [
+          "강타",
+          "연타",
+          "이동",
+          "보조"
+        ],
+        "비고": ""
+      }
     ]
   },
   "궁수": {
-    "무기": [
-      "바위 칼날",
-      "두 갈래 뿔",
-      "타오르는 영광",
-      "죽음",
-      "창백한 기수",
-      "거대한 분노",
-      "대군주+",
-      "불꽃으로 새긴 문장",
-      "광채+",
-      "눈부신 잔영"
+    "태그": [
+      "확정",
+      "연타 강화"
     ],
-    "엠블럼": [
-      "영원한 밤",
-      "해방",
-      "초월",
-      "고결함",
-      "위대함",
-      "빛바랜 별",
-      "백금 천칭",
-      "침묵",
-      "태초"
-    ],
-    "장신구": [
-      "닻+",
-      "매+",
-      "날렵함+",
-      "나선+",
-      "치명적인+",
-      "몰아침+",
-      "재빠른+",
-      "추적+",
-      "탈출+"
-    ],
-    "방어구": [
-      "숲 길잡이",
-      "교차하는 사슬",
-      "별바라기",
-      "금 간 봉인",
-      "무너진 경계",
-      "승전",
-      "기본기+",
-      "첫 번째 서약",
-      "잿빛 장막"
-    ]
-  },
-  "석궁사수": {
-    "무기": [
-      "바위 칼날",
-      "타오르는 영광",
-      "불꽃으로 새긴 문장",
-      "죽음",
-      "창백한 기수",
-      "억눌린 충동",
-      "추적자",
-      "오랜 광기",
-      "광채+"
-    ],
-    "엠블럼": [
-      "영원한 밤",
-      "해방",
-      "위대함",
-      "빛바랜 별",
-      "초월",
-      "백금 천칭",
-      "고결함",
-      "침묵",
-      "태초"
-    ],
-    "장신구": [
-      "꿰뚫음+",
-      "반전+",
-      "균열+",
-      "산탄+",
-      "화약+",
-      "연쇄+",
-      "감전+",
-      "방해+",
-      "전류+"
-    ],
-    "방어구": [
-      "기본기+",
-      "별바라기",
-      "무너진 경계",
-      "첫 번째 서약",
-      "무한한 탐욕",
-      "교차하는 사슬",
-      "칼바람",
-      "수호자",
-      "계승자"
+    "장신구": {
+      "60%": [
+        "닻",
+        "날렵함",
+        "매"
+      ],
+      "10%": [
+        "나선"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "교차하는 사슬",
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기",
+        "얼음 발톱"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "무너진 경계",
+        "잿빛 장막"
+      ],
+      "그외": [
+        "숲 길잡이",
+        "승전",
+        "기사단장"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "타오르는 영광"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "해방"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "닻 날렵함 매",
+        "개조": "156",
+        "세공": [
+          "연타",
+          "방해",
+          "강타"
+        ],
+        "비고": ""
+      }
     ]
   },
   "장궁병": {
-    "무기": [
-      "타오르는 영광",
-      "바위 칼날",
-      "억눌린 충동",
-      "죽음",
-      "광채+",
-      "대군주+",
-      "눈부신 잔영",
-      "오랜 광기",
-      "거대한 분노",
-      "햇살+"
+    "태그": [
+      "확정",
+      "강타 강화"
     ],
-    "엠블럼": [
-      "영원한 밤",
-      "위대함",
-      "빛바랜 별",
-      "해방",
-      "초월",
-      "고결함",
-      "침묵",
-      "태초",
-      "백금 천칭"
+    "장신구": {
+      "60%": [
+        "초음파",
+        "호응",
+        "돌개"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약",
+        "교차하는 사슬"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "흐릿한 형상",
+        "금 간 봉인",
+        "무너진 경계"
+      ],
+      "그외": [
+        "뼈 인장",
+        "승전",
+        "칼바람",
+        "계승자",
+        "등대지기"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "타오르는 영광"
+      ],
+      "대체": [
+        "바위 칼날"
+      ],
+      "비고": "1픽 교체"
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "위대함"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "초음파 호응 돌개",
+        "개조": "23 6/4",
+        "세공": [
+          "강타",
+          "방해",
+          "연타"
+        ],
+        "비고": ""
+      }
+    ]
+  },
+  "석궁사수": {
+    "태그": [
+      "분기",
+      "스킬 위력"
     ],
-    "장신구": [
-      "호응+",
-      "초음파+",
-      "돌개+",
-      "끈질김+",
-      "파쇄+",
-      "내상+",
-      "비연+",
-      "무너짐+",
-      "집중+"
-    ],
-    "방어구": [
-      "기본기+",
-      "흐릿한 형상",
-      "뼈 인장",
-      "칼바람",
-      "잠든 땅",
-      "가라앉은 왕국",
-      "아귀",
-      "끓는 피",
-      "첫 번째 서약"
+    "장신구": {
+      "60%": [
+        "꿰뚫음",
+        "반전▲"
+      ],
+      "30%": [
+        "산탄▲",
+        "균열▲",
+        "화약"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약",
+        "교차하는 사슬"
+      ],
+      "용문장": [
+        "별바라기",
+        "잠들지 않는 불"
+      ],
+      "침식": [
+        "무너진 경계",
+        "금 간 봉인",
+        "잿빛 장막"
+      ],
+      "그외": [
+        "무한한 탐욕",
+        "계승자",
+        "칼바람",
+        "승전"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "타오르는 영광"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "해방"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "꿰뚫음 반전 균열",
+        "개조": "246",
+        "세공": [
+          "원소",
+          "강타",
+          "연타"
+        ],
+        "비고": "일반-편의"
+      },
+      {
+        "조합": "꿰뚫음 산탄 균열",
+        "개조": "246",
+        "세공": null,
+        "비고": "짧은 극딜"
+      },
+      {
+        "조합": "꿰뚫음 산탄 화약",
+        "개조": "146",
+        "세공": null,
+        "비고": "고점-시즈"
+      }
     ]
   },
   "마법사": {
-    "무기": [
-      "계시+",
-      "타오르는 영광",
-      "바위 칼날",
-      "광채+",
-      "죽음",
-      "억눌린 충동",
-      "거대한 분노",
-      "대군주+",
-      "햇살+",
-      "추적자"
+    "태그": [
+      "분기",
+      "빠른 스킬"
     ],
-    "엠블럼": [
-      "빛바랜 별",
-      "고결함",
-      "영원한 밤",
-      "위대함",
-      "해방",
-      "초월",
-      "침묵",
-      "백금 천칭",
-      "태초"
-    ],
-    "장신구": [
-      "운석+",
-      "우레+",
-      "서리가시+",
-      "빙창+",
-      "낙뢰+",
-      "산사태+",
-      "아귀",
-      "암석+",
-      "증폭+"
-    ],
-    "방어구": [
-      "봉인술사",
-      "별바라기",
-      "계승자",
-      "금 간 봉인",
-      "승전",
-      "무한한 탐욕",
-      "첫 번째 서약",
-      "흐릿한 형상",
-      "녹슨 방패",
-      "번개 숨결"
-    ]
-  },
-  "화염술사": {
-    "무기": [
-      "바위 칼날",
-      "광채+",
-      "타오르는 영광",
-      "창백한 기수",
-      "죽음",
-      "계시+",
-      "억눌린 충동",
-      "불꽃으로 새긴 문장",
-      "햇살+",
-      "거대한 분노"
-    ],
-    "엠블럼": [
-      "영원한 밤",
-      "위대함",
-      "해방",
-      "빛바랜 별",
-      "초월",
-      "고결함",
-      "태초",
-      "침묵",
-      "백금 천칭"
-    ],
-    "장신구": [
-      "폭격+",
-      "분출+",
-      "청염+",
-      "불기둥+",
-      "잿더미+",
-      "발화+",
-      "화력+",
-      "열풍+",
-      "불씨+"
-    ],
-    "방어구": [
-      "별바라기",
-      "뼈 인장",
-      "첫 번째 서약",
-      "무너진 경계",
-      "금 간 봉인",
-      "잠들지 않는 불",
-      "얼음 발톱",
-      "수정+",
-      "기본기+",
-      "녹슨 방패"
+    "장신구": {
+      "60%": [
+        "운석",
+        "우레"
+      ],
+      "30%": [
+        "서리가시",
+        "빙창▲"
+      ],
+      "10%": [
+        "산사태"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "흐릿한 형상",
+        "무너진 경계"
+      ],
+      "그외": [
+        "봉인술사",
+        "무한한 탐욕",
+        "계승자",
+        "승전",
+        "칼바람",
+        "잊힌 맹약"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "계시+"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "고결함"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "운석 우레 서리가시",
+        "개조": "123",
+        "세공": [
+          "원소",
+          "방해",
+          "강타"
+        ],
+        "비고": ""
+      },
+      {
+        "조합": "운석 우레 빙창",
+        "개조": null,
+        "세공": null,
+        "비고": ""
+      }
     ]
   },
   "빙결술사": {
-    "무기": [
-      "바위 칼날",
-      "광채+",
-      "대군주+",
-      "계시+",
-      "죽음",
-      "타오르는 영광",
-      "거대한 분노",
-      "햇살+",
-      "추적자",
-      "창백한 기수"
+    "태그": [
+      "확정",
+      "스킬 위력"
     ],
-    "엠블럼": [
-      "해방",
-      "빛바랜 별",
-      "초월",
-      "영원한 밤",
-      "위대함",
-      "태초",
-      "침묵",
-      "고결함",
-      "백금 천칭"
+    "장신구": {
+      "60%": [
+        "빙하",
+        "설원▲",
+        "북풍"
+      ],
+      "10%": [
+        "빙검"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약",
+        "교차하는 사슬"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "무너진 경계",
+        "잿빛 장막"
+      ],
+      "그외": [
+        "위엄",
+        "서광",
+        "칼바람",
+        "승전",
+        "등대지기"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "광채+"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "해방"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "빙하 설원 북풍",
+        "개조": "456",
+        "세공": [
+          "원소",
+          "소환",
+          "생존",
+          "강타"
+        ],
+        "비고": ""
+      }
+    ]
+  },
+  "화염술사": {
+    "태그": [
+      "확정",
+      "스킬 위력"
     ],
-    "장신구": [
-      "설원+",
-      "빙하+",
-      "북풍+",
-      "빙검+",
-      "오로라+",
-      "수정+",
-      "파편+",
-      "고드름+"
-    ],
-    "방어구": [
-      "서광",
-      "위엄",
-      "금 간 봉인",
-      "칼바람",
-      "잿빛 장막",
-      "녹슨 방패",
-      "잠들지 않는 불",
-      "숲 길잡이",
-      "승전"
+    "장신구": {
+      "60%": [
+        "폭격",
+        "분출",
+        "청염"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약",
+        "교차하는 사슬"
+      ],
+      "용문장": [
+        "별바라기",
+        "잠들지 않는 불",
+        "얼음 발톱"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "무너진 경계",
+        "잿빛 장막"
+      ],
+      "그외": [
+        "뼈 인장",
+        "승전",
+        "계승자",
+        "수호자"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "광채+",
+        "타오르는 영광"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "위대함"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "폭격 분출 청염",
+        "개조": "136",
+        "세공": [
+          "원소",
+          "강타",
+          "연타",
+          "방해"
+        ],
+        "비고": ""
+      }
     ]
   },
   "전격술사": {
-    "무기": [
-      "계시+",
-      "광채+",
-      "타오르는 영광",
-      "죽음",
-      "억눌린 충동",
-      "바위 칼날",
-      "거대한 분노",
-      "암운+",
-      "오랜 광기",
-      "창백한 기수"
+    "태그": [
+      "확정",
+      "강타 강화"
     ],
-    "엠블럼": [
-      "위대함",
-      "초월",
-      "태초",
-      "영원한 밤",
-      "빛바랜 별",
-      "고결함",
-      "해방",
-      "침묵",
-      "백금 천칭"
-    ],
-    "장신구": [
-      "섬광+",
-      "폭풍우+",
-      "도관+",
-      "천둥+",
-      "방전+",
-      "환기+",
-      "장막+",
-      "벼락+",
-      "역장+"
-    ],
-    "방어구": [
-      "기본기+",
-      "봉인술사",
-      "금 간 봉인",
-      "첫 번째 서약",
-      "별바라기",
-      "흐릿한 형상",
-      "녹슨 방패",
-      "날 선 적의",
-      "번개 숨결"
+    "장신구": {
+      "60%": [
+        "섬광",
+        "폭풍우",
+        "도관"
+      ],
+      "10%": [
+        "천둥"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약",
+        "교차하는 사슬"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "무너진 경계",
+        "흐릿한 형상"
+      ],
+      "그외": [
+        "봉인술사",
+        "무한한 탐욕",
+        "계승자",
+        "승전",
+        "아귀"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "계시+"
+      ],
+      "대체": [
+        "타오르는 영광"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "위대함"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "섬광 폭풍우 도관",
+        "개조": "245",
+        "세공": [
+          "원소",
+          "강타",
+          "보조",
+          "방해",
+          "보조쿨"
+        ],
+        "비고": ""
+      }
     ]
   },
   "힐러": {
-    "무기": [
-      "바위 칼날",
-      "계시+",
-      "햇살+",
-      "타오르는 영광",
-      "대군주+",
-      "죽음",
-      "불꽃으로 새긴 문장",
-      "거대한 분노",
-      "억눌린 충동",
-      "추적자"
+    "태그": [
+      "확정",
+      "스킬 위력"
     ],
-    "엠블럼": [
-      "해방",
-      "영원한 밤",
-      "초월",
-      "고결함",
-      "태초",
-      "백금 천칭",
-      "빛바랜 별",
-      "위대함",
-      "침묵"
-    ],
-    "장신구": [
-      "가호+",
-      "광륜+",
-      "물결+",
-      "개화+",
-      "억압+",
-      "서약+",
-      "고동침+",
-      "빛무리+",
-      "감쌈+"
-    ],
-    "방어구": [
-      "긍지",
-      "교차하는 사슬",
-      "금 간 봉인",
-      "비늘 덮인 현자",
-      "승전",
-      "별바라기",
-      "잿빛 장막",
-      "뼈 인장",
-      "무너진 경계"
+    "장신구": {
+      "60%": [
+        "광륜",
+        "가호",
+        "물결"
+      ],
+      "10%": [
+        "고동침"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "교차하는 사슬",
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "잿빛 장막",
+        "무너진 경계"
+      ],
+      "그외": [
+        "금지",
+        "승전",
+        "비늘 덮인 현자",
+        "뼈 인장",
+        "바다뱀+"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "잿숯+"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "해방"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "광륜 가호 물결",
+        "개조": "345",
+        "세공": [
+          "보조",
+          "연타",
+          "보조",
+          "콜소환"
+        ],
+        "비고": ""
+      }
     ]
   },
   "사제": {
-    "무기": [
-      "계시+",
-      "광채+",
-      "바위 칼날",
-      "죽음",
-      "타오르는 영광",
-      "오랜 광기",
-      "거대한 분노",
-      "부패+",
-      "억눌린 충동",
-      "대군주+"
+    "태그": [
+      "확정",
+      "강타 강화"
     ],
-    "엠블럼": [
-      "위대함",
-      "영원한 밤",
-      "초월",
-      "빛바랜 별",
-      "고결함",
-      "해방",
-      "침묵",
-      "백금 천칭"
-    ],
-    "장신구": [
-      "집행+",
-      "심판+",
-      "성전+",
-      "결속+",
-      "날개+",
-      "수레바퀴+",
-      "빛줄기+",
-      "축복+",
-      "희생+"
-    ],
-    "방어구": [
-      "뼈 인장",
-      "별바라기",
-      "승전",
-      "긍지",
-      "무너진 경계",
-      "숲 길잡이",
-      "빛줄기+",
-      "축성+",
-      "사슬로 묶은 법전",
-      "대군주+"
+    "장신구": {
+      "60%": [
+        "심판",
+        "집행",
+        "성전"
+      ],
+      "10%": [
+        "결속",
+        "날개"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약",
+        "교차하는 사슬"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "무너진 경계",
+        "금 간 봉인"
+      ],
+      "그외": [
+        "뼈 인장",
+        "금지",
+        "칼바람",
+        "무한한 탐욕",
+        "승전"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "광채+"
+      ],
+      "대체": [
+        "게시+"
+      ],
+      "비고": "1픽 교체"
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "위대함"
+      ],
+      "비고": "1픽 교체"
+    },
+    "제보": [
+      {
+        "조합": "심판 집행 성전",
+        "개조": "35 2/1",
+        "세공": [
+          "보조",
+          "강타",
+          "방해",
+          "강"
+        ],
+        "비고": ""
+      }
     ]
   },
   "수도사": {
-    "무기": [
-      "바위 칼날",
-      "두 갈래 뿔",
-      "오랜 광기",
-      "눈부신 잔영",
-      "죽음",
-      "광채+",
-      "거대한 분노",
-      "부패+",
-      "억눌린 충동",
-      "암운+"
+    "태그": [
+      "확정",
+      "빠른 스킬"
     ],
-    "엠블럼": [
-      "영원한 밤",
-      "고결함",
-      "해방",
-      "백금 천칭",
-      "위대함",
-      "초월",
-      "빛바랜 별",
-      "태초",
-      "침묵"
-    ],
-    "장신구": [
-      "등불+",
-      "뇌정+",
-      "인과+",
-      "해일+",
-      "업화+",
-      "광휘+",
-      "응보+",
-      "축성+"
-    ],
-    "방어구": [
-      "긍지",
-      "열의+",
-      "금 간 봉인",
-      "비늘 덮인 현자",
-      "잠든 땅",
-      "칼바람",
-      "숲 길잡이",
-      "끓는 피",
-      "잠들지 않는 불"
+    "장신구": {
+      "60%": [
+        "등불",
+        "인과",
+        "뇌정"
+      ],
+      "10%": [
+        "해일"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "무너진 경계",
+        "잿빛 장막"
+      ],
+      "그외": [
+        "금지",
+        "열의+",
+        "비늘 덮인 현자",
+        "잠든 땅",
+        "승전",
+        "녹슨 방패"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "두 갈래 뿔"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "백금 천칭"
+      ],
+      "대체": [
+        "영원한 밤"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "등불 인과 뇌정",
+        "개조": "123",
+        "세공": [
+          "연타",
+          "보조",
+          "이동",
+          "방해"
+        ],
+        "비고": ""
+      }
     ]
   },
   "암흑술사": {
-    "무기": [
-      "바위 칼날",
-      "죽음",
-      "광채+",
-      "억눌린 충동",
-      "계시+",
-      "눈부신 잔영",
-      "창백한 기수",
-      "햇살+",
-      "두 갈래 뿔",
-      "타오르는 영광"
+    "태그": [
+      "유력",
+      "연타 강화"
     ],
-    "엠블럼": [
-      "영원한 밤",
-      "해방",
-      "빛바랜 별",
-      "초월",
-      "백금 천칭",
-      "고결함",
-      "위대함",
-      "태초",
-      "침묵"
-    ],
-    "장신구": [
-      "구속+",
-      "광기+",
-      "나락+",
-      "타락+",
-      "절제+",
-      "속박+",
-      "제사장+",
-      "심연+",
-      "착취+"
-    ],
-    "방어구": [
-      "바다뱀+",
-      "봉인술사",
-      "첫 번째 서약",
-      "용 사냥꾼",
-      "무형",
-      "기본기+",
-      "끓는 피",
-      "비늘 덮인 현자",
-      "교차하는 사슬",
-      "잠든 땅"
-    ]
-  },
-  "음유시인": {
-    "무기": [
-      "대군주+",
-      "타오르는 영광",
-      "죽음",
-      "두 갈래 뿔",
-      "암운+",
-      "바위 칼날",
-      "억눌린 충동",
-      "창백한 기수",
-      "오랜 광기",
-      "광채+"
-    ],
-    "엠블럼": [
-      "침묵",
-      "백금 천칭",
-      "영원한 밤",
-      "해방",
-      "초월",
-      "고결함",
-      "위대함",
-      "태초"
-    ],
-    "장신구": [
-      "합주+",
-      "무아+",
-      "화음+",
-      "조롱+",
-      "변주+",
-      "급습+",
-      "재치+",
-      "기만+",
-      "즉흥+"
-    ],
-    "방어구": [
-      "긍지",
-      "무너진 경계",
-      "잿빛 장막",
-      "기본기+",
-      "비늘 덮인 현자",
-      "사슬로 묶은 법전",
-      "용 사냥꾼",
-      "바다뱀+",
-      "칼바람",
-      "가라앉은 왕국"
-    ]
-  },
-  "댄서": {
-    "무기": [
-      "바위 칼날",
-      "광채+",
-      "햇살+",
-      "거대한 분노",
-      "억눌린 충동",
-      "불꽃으로 새긴 문장",
-      "타오르는 영광",
-      "죽음",
-      "부패+",
-      "대군주+"
-    ],
-    "엠블럼": [
-      "초월",
-      "해방",
-      "영원한 밤",
-      "위대함",
-      "고결함",
-      "빛바랜 별",
-      "침묵",
-      "백금 천칭",
-      "태초"
-    ],
-    "장신구": [
-      "발걸음+",
-      "환호+",
-      "전환+",
-      "갈채+",
-      "나비+",
-      "정열+",
-      "간결함+",
-      "다가옴+",
-      "산뜻함+"
-    ],
-    "방어구": [
-      "계승자",
-      "녹슨 방패",
-      "공허",
-      "뼈 인장",
-      "잠든 땅",
-      "기본기+",
-      "끓는 피",
-      "열의+",
-      "긍지",
-      "교차하는 사슬"
-    ]
-  },
-  "악사": {
-    "무기": [
-      "바위 칼날",
-      "광채+",
-      "억눌린 충동",
-      "계시+",
-      "타오르는 영광",
-      "대군주+",
-      "햇살+",
-      "고결함",
-      "거대한 분노",
-      "죽음"
-    ],
-    "엠블럼": [
-      "해방",
-      "영원한 밤",
-      "초월",
-      "빛바랜 별",
-      "위대함",
-      "고결함",
-      "태초",
-      "침묵",
-      "백금 천칭"
-    ],
-    "장신구": [
-      "조율+",
-      "순환+",
-      "속주+",
-      "종장+",
-      "매혹+",
-      "흥성+",
-      "공명+",
-      "박애+",
-      "이중주+"
-    ],
-    "방어구": [
-      "뼈 인장",
-      "칼바람",
-      "바다뱀+",
-      "무형",
-      "빛살+",
-      "여신",
-      "잠든 땅",
-      "기본기+",
-      "이중주+",
-      "무너진 경계"
+    "장신구": {
+      "60%": [
+        "구속",
+        "절제▲"
+      ],
+      "30%": [
+        "광기"
+      ],
+      "10%": [
+        "나락▲",
+        "타락",
+        "속박",
+        "제사장"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "교차하는 사슬",
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "무너진 경계",
+        "금 간 봉인",
+        "잿빛 장막"
+      ],
+      "그외": [
+        "바다뱀+",
+        "봉인술사",
+        "뼈 인장",
+        "승전"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "게시+"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "해방"
+      ]
+    },
+    "참고": "기본기 24% 잔존 - 룬 보유 공백 지표",
+    "제보": [
+      {
+        "조합": "구속 절제 광기",
+        "개조": "13 4/5",
+        "세공": [
+          "소환",
+          "방해",
+          "연타",
+          "보조"
+        ],
+        "비고": ""
+      }
     ]
   },
   "도적": {
-    "무기": [
-      "부패+",
-      "바위 칼날",
-      "두 갈래 뿔",
-      "죽음",
-      "햇살+",
-      "억눌린 충동",
-      "추적자",
-      "오랜 광기",
-      "암운+",
-      "타오르는 영광"
+    "태그": [
+      "유력",
+      "연타 강화"
     ],
-    "엠블럼": [
-      "영원한 밤",
-      "백금 천칭",
-      "초월",
-      "해방",
-      "태초",
-      "위대함",
-      "빛바랜 별",
-      "침묵",
-      "고결함"
-    ],
-    "장신구": [
-      "폭발+",
-      "덫+",
-      "땅거미+",
-      "독무+",
-      "투척+",
-      "교활함+",
-      "독성+",
-      "치밀함+",
-      "주입+"
-    ],
-    "방어구": [
-      "기본기+",
-      "열의+",
-      "금 간 봉인",
-      "무너진 경계",
-      "뼈 인장",
-      "빛줄기+",
-      "축복+",
-      "날 선 적의",
-      "용 사냥꾼",
-      "여신"
-    ]
-  },
-  "격투가": {
-    "무기": [
-      "타오르는 영광",
-      "죽음",
-      "억눌린 충동",
-      "바위 칼날",
-      "햇살+",
-      "계시+",
-      "암운+",
-      "광채+",
-      "부패+",
-      "거대한 분노"
-    ],
-    "엠블럼": [
-      "영원한 밤",
-      "위대함",
-      "초월",
-      "고결함",
-      "해방",
-      "빛바랜 별",
-      "태초",
-      "침묵",
-      "백금 천칭"
-    ],
-    "장신구": [
-      "승천+",
-      "강격+",
-      "전진+",
-      "약점+",
-      "열혈+",
-      "격파+",
-      "순발력+",
-      "충돌+",
-      "도약+"
-    ],
-    "방어구": [
-      "녹슨 방패",
-      "용 사냥꾼",
-      "날 선 적의",
-      "무형",
-      "기본기+",
-      "가라앉은 왕국",
-      "은빛 찬가",
-      "잠든 땅",
-      "별바라기",
-      "교차하는 사슬"
+    "장신구": {
+      "60%": [
+        "덫",
+        "폭발"
+      ],
+      "30%": [
+        "땅거미",
+        "교활함▲"
+      ],
+      "10%": [
+        "투척"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "교차하는 사슬",
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "무너진 경계",
+        "잿빛 장막"
+      ],
+      "그외": [
+        "열의+",
+        "계승자"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "두 갈래 뿔"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "해방",
+        "백금 천칭"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "덫 폭발 땅거미",
+        "개조": "34 1/2",
+        "세공": [
+          "방해",
+          "강타",
+          "연타"
+        ],
+        "비고": ""
+      },
+      {
+        "조합": "덫 폭발 교활함",
+        "개조": null,
+        "세공": null,
+        "비고": ""
+      }
     ]
   },
   "듀얼블레이드": {
-    "무기": [
-      "바위 칼날",
-      "죽음",
-      "억눌린 충동",
-      "두 갈래 뿔",
-      "암운+",
-      "불꽃으로 새긴 문장",
-      "추적자",
-      "오랜 광기",
-      "타오르는 영광",
-      "창백한 기수"
+    "태그": [
+      "확정",
+      "연타 강화"
     ],
-    "엠블럼": [
-      "해방",
-      "영원한 밤",
-      "초월",
-      "백금 천칭",
-      "침묵",
-      "고결함",
-      "위대함",
-      "태초",
-      "빛바랜 별"
+    "장신구": {
+      "60%": [
+        "천침",
+        "교차",
+        "강화"
+      ],
+      "10%": [
+        "속행",
+        "질주"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "교차하는 사슬",
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기",
+        "잠들지 않는 불"
+      ],
+      "침식": [
+        "무너진 경계",
+        "잿빛 장막",
+        "금 간 봉인"
+      ],
+      "그외": [
+        "무한한 탐욕",
+        "숲 길잡이",
+        "승전",
+        "녹슨 방패",
+        "계승자"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "타오르는 영광"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "해방"
+      ],
+      "대체": [
+        "영원한 밤"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "천침 교차 강화",
+        "개조": "45 1/6",
+        "세공": [
+          "연타",
+          "이동",
+          "강타",
+          "보조"
+        ],
+        "비고": ""
+      }
+    ]
+  },
+  "격투가": {
+    "태그": [
+      "확정",
+      "강타 강화"
     ],
-    "장신구": [
-      "교차+",
-      "천칭+",
-      "질주+",
-      "강화+",
-      "속행+",
-      "보름달+",
-      "열상+",
-      "회오리+",
-      "기본+"
+    "장신구": {
+      "60%": [
+        "승천",
+        "강격",
+        "전진"
+      ],
+      "10%": [
+        "약점",
+        "열혈"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "첫 번째 서약",
+        "교차하는 사슬"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "무너진 경계",
+        "흐릿한 형상"
+      ],
+      "그외": [
+        "승전",
+        "아귀▲",
+        "서광",
+        "공허"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "타오르는 영광"
+      ],
+      "대체": [
+        "햇살+"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "위대함"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "승천 강격 전진",
+        "개조": "45 6/1",
+        "세공": [
+          "강타",
+          "이동",
+          "보조"
+        ],
+        "비고": ""
+      }
+    ]
+  },
+  "음유시인": {
+    "태그": [
+      "분기",
+      "연타 강화"
     ],
-    "방어구": [
-      "교차하는 사슬",
-      "숲 길잡이",
-      "금 간 봉인",
-      "무한한 탐욕",
-      "잠들지 않는 불",
-      "수호자",
-      "용 사냥꾼",
-      "사슬로 묶은 법전",
-      "잠든 땅"
+    "장신구": {
+      "60%": [
+        "무아",
+        "합주"
+      ],
+      "30%": [
+        "변주▲"
+      ],
+      "10%": [
+        "기만",
+        "조롱",
+        "급습",
+        "화음"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "교차하는 사슬",
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "무너진 경계",
+        "잿빛 장막"
+      ],
+      "그외": [
+        "긍지",
+        "비늘 덮인 현자",
+        "승전",
+        "뼈 인장",
+        "바다뱀+"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "대군주+"
+      ],
+      "대체": [
+        "타오르는 영광"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "해방"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "무아 합주 변주",
+        "개조": "134",
+        "세공": [
+          "방해",
+          "보조",
+          "연타",
+          "강타"
+        ],
+        "비고": "변주-급습"
+      }
+    ]
+  },
+  "악사": {
+    "태그": [
+      "분기",
+      "스킬 위력"
+    ],
+    "장신구": {
+      "60%": [
+        "조율"
+      ],
+      "30%": [
+        "순환▲",
+        "매혹▲",
+        "속주",
+        "종장"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "교차하는 사슬",
+        "첫 번째 서약"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "무너진 경계",
+        "금 간 봉인",
+        "잿빛 장막"
+      ],
+      "그외": [
+        "뼈 인장",
+        "칼바람",
+        "바다뱀+",
+        "승전",
+        "계승자",
+        "봉인술사"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "광채+"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "대체": [
+        "해방"
+      ]
+    },
+    "제보": [
+      {
+        "조합": "조율 순환 매혹",
+        "개조": "235",
+        "세공": [
+          "방해",
+          "연타",
+          "보조"
+        ],
+        "비고": "주류 픽"
+      },
+      {
+        "조합": "조율 속주 종장",
+        "개조": "345",
+        "세공": [
+          "방해",
+          "강타",
+          "연타"
+        ],
+        "비고": "고점-대안"
+      }
+    ]
+  },
+  "댄서": {
+    "태그": [
+      "확정",
+      "연타 강화"
+    ],
+    "장신구": {
+      "60%": [
+        "전환",
+        "발걸음",
+        "환호"
+      ],
+      "10%": [
+        "갈채"
+      ]
+    },
+    "방어구": {
+      "각성": [
+        "교차하는 사슬"
+      ],
+      "용문장": [
+        "별바라기"
+      ],
+      "침식": [
+        "금 간 봉인",
+        "잿빛 장막",
+        "무너진 경계"
+      ],
+      "그외": [
+        "계승자",
+        "숲 길잡이",
+        "승전",
+        "녹슨 방패",
+        "공허"
+      ]
+    },
+    "무기": {
+      "주력": [
+        "바위 칼날"
+      ],
+      "대체": [
+        "광채+"
+      ]
+    },
+    "엠블럼": {
+      "주력": [
+        "영원한 밤"
+      ],
+      "비고": "초월·해방 - 3종 경합"
+    },
+    "참고": "기본기 23% 잔존 - 룬 보유 공백 지표",
+    "제보": [
+      {
+        "조합": "전환 발걸음 환호",
+        "개조": "35 1/6",
+        "세공": [
+          "연타",
+          "이동",
+          "강타",
+          "보조"
+        ],
+        "비고": ""
+      }
     ]
   }
 }
-},{}],22:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
+module.exports=[
+  {
+    "shop": "던바튼",
+    "skill": "대장",
+    "item": "크레센트 엣지소드",
+    "scrollCount": 3,
+    "expPerScroll": 381,
+    "materials": [
+      {
+        "name": "가죽+",
+        "qty": 4
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "던바튼",
+    "skill": "목공",
+    "item": "그랜드 크로스보우",
+    "scrollCount": 3,
+    "expPerScroll": 381,
+    "materials": [
+      {
+        "name": "목재+",
+        "qty": 4
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "던바튼",
+    "skill": "매직",
+    "item": "로터스 힐링 완드",
+    "scrollCount": 3,
+    "expPerScroll": 381,
+    "materials": [
+      {
+        "name": "목재+",
+        "qty": 4
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "반호르",
+    "skill": "대장",
+    "item": "론 엣지소드S",
+    "scrollCount": 3,
+    "expPerScroll": 426,
+    "materials": [
+      {
+        "name": "가죽+",
+        "qty": 6
+      },
+      {
+        "name": "합금강괴",
+        "qty": 6
+      }
+    ]
+  },
+  {
+    "shop": "반호르",
+    "skill": "목공",
+    "item": "라이트 크로스보우S",
+    "scrollCount": 3,
+    "expPerScroll": 426,
+    "materials": [
+      {
+        "name": "상급 목재",
+        "qty": 6
+      },
+      {
+        "name": "강철괴",
+        "qty": 6
+      }
+    ]
+  },
+  {
+    "shop": "반호르",
+    "skill": "매직",
+    "item": "마블 힐링 완드S",
+    "scrollCount": 3,
+    "expPerScroll": 426,
+    "materials": [
+      {
+        "name": "상급 목재",
+        "qty": 6
+      },
+      {
+        "name": "강철괴",
+        "qty": 6
+      }
+    ]
+  },
+  {
+    "shop": "이멘마하",
+    "skill": "중갑",
+    "item": "비늘 갑옷 신발S",
+    "scrollCount": 3,
+    "expPerScroll": 324,
+    "materials": [
+      {
+        "name": "가죽+",
+        "qty": 4
+      },
+      {
+        "name": "합금강괴",
+        "qty": 6
+      }
+    ]
+  },
+  {
+    "shop": "이멘마하",
+    "skill": "경갑",
+    "item": "가죽 갑옷 신발S",
+    "scrollCount": 3,
+    "expPerScroll": 324,
+    "materials": [
+      {
+        "name": "상급 가죽",
+        "qty": 6
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "이멘마하",
+    "skill": "천옷",
+    "item": "전투복 신발S",
+    "scrollCount": 3,
+    "expPerScroll": 324,
+    "materials": [
+      {
+        "name": "상급 옷감",
+        "qty": 6
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "콜헨",
+    "skill": "중갑",
+    "item": "사슬 갑옷 신발",
+    "scrollCount": 3,
+    "expPerScroll": 285,
+    "materials": [
+      {
+        "name": "가죽+",
+        "qty": 2
+      },
+      {
+        "name": "강철괴",
+        "qty": 4
+      }
+    ]
+  },
+  {
+    "shop": "콜헨",
+    "skill": "경갑",
+    "item": "두꺼운 가죽 갑옷 신발",
+    "scrollCount": 3,
+    "expPerScroll": 285,
+    "materials": [
+      {
+        "name": "가죽+",
+        "qty": 4
+      },
+      {
+        "name": "강철괴",
+        "qty": 2
+      }
+    ]
+  },
+  {
+    "shop": "콜헨",
+    "skill": "천옷",
+    "item": "두꺼운 전투복 신발",
+    "scrollCount": 3,
+    "expPerScroll": 285,
+    "materials": [
+      {
+        "name": "옷감+",
+        "qty": 4
+      },
+      {
+        "name": "강철괴",
+        "qty": 2
+      }
+    ]
+  }
+]
+},{}],24:[function(require,module,exports){
 module.exports={
   "123": [
     {
@@ -5944,7 +7250,7 @@ module.exports={
     }
   ]
 }
-},{}],23:[function(require,module,exports){
+},{}],25:[function(require,module,exports){
 
 /**
  * index.js
@@ -5962,6 +7268,7 @@ require("./commands/jobguide.js");
 require("./commands/maintenance.js");
 require("./commands/homework.js");
 require("./commands/officialnews.js");
+require("./commands/scroll.js");
 require("./commands/fun.js");
 require("./commands/admin.js");
 require("./commands/botcontrol.js");
@@ -5998,4 +7305,4 @@ if (typeof GoombaBotRuntime !== "undefined") {
 }
 
 
-},{"./commands/admin.js":1,"./commands/botcontrol.js":2,"./commands/fun.js":3,"./commands/homework.js":4,"./commands/jobguide.js":5,"./commands/maintenance.js":6,"./commands/market.js":7,"./commands/officialnews.js":8,"./commands/resistance.js":9,"./commands/search.js":10,"./core/config.js":13}]},{},[23]);
+},{"./commands/admin.js":1,"./commands/botcontrol.js":2,"./commands/fun.js":3,"./commands/homework.js":4,"./commands/jobguide.js":5,"./commands/maintenance.js":6,"./commands/market.js":7,"./commands/officialnews.js":8,"./commands/resistance.js":9,"./commands/scroll.js":10,"./commands/search.js":11,"./core/config.js":14}]},{},[25]);

@@ -163,32 +163,45 @@ function goombaLoaderFetchAndApply(url, report) {
   return result;
 }
 
-var goombaBot = BotManager.getCurrentBot();
-goombaBot.setCommandPrefix("!");
-
-function goombaReportToRoom(message) {
-  try { if (GOOMBABOT_REPORT_ROOM) goombaBot.send(GOOMBABOT_REPORT_ROOM, message); } catch (sendError) {}
-  try { Log.i("GoombaBotLoader", message); } catch (logError) {}
+// ⚠️ 방어적 처리 추가 - 실기기에서 "ReferenceError: BotManager is not defined"가
+// 뜬 적이 있음(메신저봇R 앱/서비스가 아직 준비 안 된 순간에 스크립트가 돌았던 것으로
+// 추정, 코드 자체 문제는 아닌 것으로 보임). BotManager가 없으면 이후 코드가 전부
+// 죽어버리므로, 최소한 무슨 상황인지 로그로 남기고 조용히 멈추게 한다(기존에 정상
+// 동작하던 경로는 전혀 안 바뀜 - BotManager가 있으면 이전과 100% 동일하게 진행).
+var goombaBot = null;
+try {
+  goombaBot = BotManager.getCurrentBot();
+} catch (botManagerError) {
+  try { Log.i("GoombaBotLoader", "BotManager를 아직 못 가져왔습니다(앱 재시작 후 다시 시도해주세요): " + botManagerError); } catch (ignore1) {}
 }
 
-goombaBot.addListener(Event.COMMAND, function (chat) {
-  if (chat.command === "로더업데이트") {
-    var r = goombaLoaderFetchAndApply(GOOMBABOT_MAIN_JS_B64_URL, function (step) { chat.reply(step); });
-    chat.reply(r.success ? "\uD83D\uDD27 업데이트 완료" : "\u274C 업데이트 실패: " + r.error);
-    return;
+if (goombaBot) {
+  goombaBot.setCommandPrefix("!");
+
+  var goombaReportToRoom = function (message) {
+    try { if (GOOMBABOT_REPORT_ROOM) goombaBot.send(GOOMBABOT_REPORT_ROOM, message); } catch (sendError) {}
+    try { Log.i("GoombaBotLoader", message); } catch (logError) {}
+  };
+
+  goombaBot.addListener(Event.COMMAND, function (chat) {
+    if (chat.command === "로더업데이트") {
+      var r = goombaLoaderFetchAndApply(GOOMBABOT_MAIN_JS_B64_URL, function (step) { chat.reply(step); });
+      chat.reply(r.success ? "\uD83D\uDD27 업데이트 완료" : "\u274C 업데이트 실패: " + r.error);
+      return;
+    }
+    if (GoombaBotRuntime.dispatchCommand) GoombaBotRuntime.dispatchCommand(chat);
+  });
+
+  goombaBot.addListener(Event.TICK, function () {
+    if (GoombaBotRuntime.dispatchTick) GoombaBotRuntime.dispatchTick();
+  });
+
+  try {
+    var goombaInitialResult = goombaLoaderFetchAndApply(GOOMBABOT_MAIN_JS_B64_URL, function () {});
+    goombaReportToRoom(goombaInitialResult.success
+      ? "\uD83C\uDF44 굼바봇이 시작됐습니다!"
+      : "\u26A0\uFE0F 굼바봇 시작 실패: " + goombaInitialResult.error + "\n(\"!로더업데이트\"로 다시 시도할 수 있습니다)");
+  } catch (topLevelError) {
+    try { Log.i("GoombaBotLoader", "최초 실행 중 오류: " + topLevelError); } catch (ignore2) {}
   }
-  if (GoombaBotRuntime.dispatchCommand) GoombaBotRuntime.dispatchCommand(chat);
-});
-
-goombaBot.addListener(Event.TICK, function () {
-  if (GoombaBotRuntime.dispatchTick) GoombaBotRuntime.dispatchTick();
-});
-
-try {
-  var goombaInitialResult = goombaLoaderFetchAndApply(GOOMBABOT_MAIN_JS_B64_URL, function () {});
-  goombaReportToRoom(goombaInitialResult.success
-    ? "\uD83C\uDF44 굼바봇이 시작됐습니다!"
-    : "\u26A0\uFE0F 굼바봇 시작 실패: " + goombaInitialResult.error + "\n(\"!로더업데이트\"로 다시 시도할 수 있습니다)");
-} catch (topLevelError) {
-  try { Log.i("GoombaBotLoader", "최초 실행 중 오류: " + topLevelError); } catch (ignore) {}
 }
