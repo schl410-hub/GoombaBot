@@ -184,6 +184,16 @@ if (goombaBot) {
   };
 
   goombaBot.addListener(Event.COMMAND, function (chat) {
+    // ⚠️ 2026-08-26 추가 - Event.TICK이 실기기에서 전혀 안 도는 문제 확인됨(배터리
+    // 최적화를 꺼도 동일하게 안 됨 - 기기설정만으로는 해결 안 되는 것으로 보임).
+    // Event.COMMAND는 확실히 정상 동작하는 게 확인됐으므로(이 콜백 자체가 실행되고
+    // 있다는 게 증거), 누군가 명령어를 칠 때마다 그 김에 밀린 모니터 체크
+    // (dispatchTick)도 같이 돌려주는 임시방편. 완전한 실시간 알림은 아니지만(방이
+    // 계속 조용하면 여전히 못 잡음), TICK이 고쳐지기 전까지 "몇 주째 0건"보다는
+    // 훨씬 낫다. dispatchTick은 모니터별로 자체 주기(intervalMs)를 체크해서 너무
+    // 자주 불러도 안전함(중복 실행 걱정 없음).
+    if (GoombaBotRuntime.dispatchTick) GoombaBotRuntime.dispatchTick();
+
     if (chat.command === "로더업데이트") {
       var r = goombaLoaderFetchAndApply(GOOMBABOT_MAIN_JS_B64_URL, function (step) { chat.reply(step); });
       chat.reply(r.success ? "\uD83D\uDD27 업데이트 완료" : "\u274C 업데이트 실패: " + r.error);
